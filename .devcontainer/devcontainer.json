@@ -1,0 +1,80 @@
+//V3:
+{
+    "name": "AutoNPU EDA Environment",
+    "image": "mcr.microsoft.com/devcontainers/python:3.10-bookworm",
+    "runArgs": [
+        "--shm-size=2g"
+    ],
+    "features": {
+        "ghcr.io/devcontainers/features/docker-in-docker:2": {
+            "version": "latest",
+            "enableNonRootDocker": "true",
+            "moby": "false"
+        }
+    },
+    "postCreateCommand": "sudo apt-get update && sudo apt-get install -y build-essential make g++ graphviz gtkwave tcl tk verilator yosys ngspice magic && pip install --upgrade pip && pip install cocotb ray pytest",
+    "customizations": {
+        "vscode": {
+            "settings": {
+                "python.defaultInterpreterPath": "/usr/local/bin/python"
+            },
+            "extensions": [
+                "GitHub.copilot",
+                "GitHub.copilot-chat",
+                "ms-python.python",
+                "mshr-h.VerilogHDL",
+                "eamodio.gitlens"
+            ]
+        }
+    }
+}
+/*
+//V2
+{
+    "name": "AutoNPU EDA Environment",
+    "image": "mcr.microsoft.com/devcontainers/python:3.10-bookworm",
+    "features": {
+        "ghcr.io/devcontainers/features/docker-in-docker:2": {
+            "version": "latest",
+            "enableNonRootDocker": "true",
+            "moby": "false"
+        }
+    },
+    "postCreateCommand": "sudo apt-get update && sudo apt-get install -y build-essential make g++ graphviz gtkwave tcl tk verilator yosys ngspice magic && pip install --upgrade pip && pip install cocotb ray pytest",
+    "customizations": {
+        "vscode": {
+            "settings": {
+                "python.defaultInterpreterPath": "/usr/local/bin/python"
+            },
+            "extensions": [
+                "GitHub.copilot",
+                "GitHub.copilot-chat",
+                "ms-python.python",
+                "mshr-h.VerilogHDL",
+                "eamodio.gitlens"
+            ]
+        }
+    }
+}
+//V1:
+{
+    "name": "AutoNPU EDA Environment",
+    "image": "mcr.microsoft.com/devcontainers/python:3.10",
+    "postCreateCommand": 
+        "sudo apt-get update && sudo apt-get install -y verilator yosys ngspice magic && pip install cocotb ray",
+        "customizations": {
+        "vscode": {
+            "settings": {
+                "python.defaultInterpreterPath": "/usr/local/bin/python"
+            },
+            "extensions": [
+                "GitHub.copilot",
+                "GitHub.copilot-chat",
+                "ms-python.python",
+                "mshr-h.VerilogHDL",
+                "eamodio.gitlens"
+            ]
+        }
+    }
+}
+*/
