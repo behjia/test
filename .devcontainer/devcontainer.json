@@ -12,7 +12,7 @@
             "moby": "false"
         }
     },
-    "postCreateCommand": "sudo apt-get update && sudo apt-get install -y build-essential make g++ graphviz gtkwave tcl tk verilator yosys ngspice magic && pip install --upgrade pip && pip install cocotb ray pytest",
+    "postCreateCommand": "sudo apt-get update && sudo apt-get install -y build-essential make g++ graphviz gtkwave tcl tk verilator yosys ngspice magic git-lfs && pip install --upgrade pip && pip install cocotb ray pytest",
     "customizations": {
         "vscode": {
             "settings": {
