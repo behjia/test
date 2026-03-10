@@ -1,4 +1,4 @@
-//V3:
+//good luck reading post create command
 {
     "name": "AutoNPU EDA Environment",
     "image": "mcr.microsoft.com/devcontainers/python:3.10-bookworm",
@@ -12,7 +12,7 @@
             "moby": "false"
         }
     },
-    "postCreateCommand": "sudo apt-get update && sudo apt-get install -y build-essential make g++ graphviz gtkwave tcl tcllib tk iverilog yosys ngspice magic python3-venv git-lfs && pip install --upgrade pip && pip install cocotb==1.7.2 ray pytest python-dotenv anthropic && (if [ ! -d 'OpenLane' ]; then git clone --depth 1 https://github.com/The-OpenROAD-Project/OpenLane.git && cd OpenLane && make; fi)",
+    "postCreateCommand": "sudo apt-get update && sudo apt-get install -y build-essential make g++ graphviz gtkwave tcl tcllib tk iverilog yosys ngspice magic python3-venv git-lfs help2man autoconf flex bison ccache libfl2 libfl-dev zlibc zlib1g zlib1g-dev && pip install --upgrade pip && pip install cocotb ray pytest python-dotenv anthropic && (if [ ! -d '/usr/local/share/verilator' ]; then git clone https://github.com/verilator/verilator && cd verilator && git checkout stable && autoconf && ./configure && make -j 2 && sudo make install && cd .. && rm -rf verilator; fi) && (if [ ! -d 'OpenLane' ]; then git clone --depth 1 https://github.com/The-OpenROAD-Project/OpenLane.git && cd OpenLane && make; fi)",
     "customizations": {
         "vscode": {
             "settings": {
@@ -28,53 +28,3 @@
         }
     }
 }
-/*
-//V2
-{
-    "name": "AutoNPU EDA Environment",
-    "image": "mcr.microsoft.com/devcontainers/python:3.10-bookworm",
-    "features": {
-        "ghcr.io/devcontainers/features/docker-in-docker:2": {
-            "version": "latest",
-            "enableNonRootDocker": "true",
-            "moby": "false"
-        }
-    },
-    "postCreateCommand": "sudo apt-get update && sudo apt-get install -y build-essential make g++ graphviz gtkwave tcl tk verilator yosys ngspice magic && pip install --upgrade pip && pip install cocotb ray pytest",
-    "customizations": {
-        "vscode": {
-            "settings": {
-                "python.defaultInterpreterPath": "/usr/local/bin/python"
-            },
-            "extensions": [
-                "GitHub.copilot",
-                "GitHub.copilot-chat",
-                "ms-python.python",
-                "mshr-h.VerilogHDL",
-                "eamodio.gitlens"
-            ]
-        }
-    }
-}
-//V1:
-{
-    "name": "AutoNPU EDA Environment",
-    "image": "mcr.microsoft.com/devcontainers/python:3.10",
-    "postCreateCommand": 
-        "sudo apt-get update && sudo apt-get install -y verilator yosys ngspice magic && pip install cocotb ray",
-        "customizations": {
-        "vscode": {
-            "settings": {
-                "python.defaultInterpreterPath": "/usr/local/bin/python"
-            },
-            "extensions": [
-                "GitHub.copilot",
-                "GitHub.copilot-chat",
-                "ms-python.python",
-                "mshr-h.VerilogHDL",
-                "eamodio.gitlens"
-            ]
-        }
-    }
-}
-*/
