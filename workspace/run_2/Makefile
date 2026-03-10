@@ -6,6 +6,7 @@ TOPLEVEL_LANG ?= verilog
 VERILOG_SOURCES += $(PWD)/design.sv
 
 # The Python testbench file
+#COCOTB_TEST_MODULES = test_alu
 MODULE = test_alu
 TOPLEVEL ?= alu
 

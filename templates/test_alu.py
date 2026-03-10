@@ -21,7 +21,7 @@ async def alu_basic_test(dut):
         dut.opcode.value = op
         
         # 2. Wait 1 nanosecond for the combinational logic to propagate
-        await Timer(1, unit="ns")
+        await Timer(1, units="ns")
         
         # 3. Read and assert the output
         result = int(dut.result.value)

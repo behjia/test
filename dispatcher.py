@@ -1,8 +1,10 @@
 import ray
 import os
-# import time
+import time
 import json
 from verifier import run_verification
+from synthesizer import run_synthesis
+from openlane_wrapper import run_openlane
 
 # Suppress Ray's future warning regarding GPU masking
 os.environ["RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO"] = "0"
@@ -60,13 +62,40 @@ if __name__ == "__main__":
 
     print("\n================ WINNER SELECTION ================")
     if passed_designs:
-        # Sort the passed designs by execution time (fastest compilation/simulation wins)
+        # Sort the passed designs by execution time
         winner = sorted(passed_designs, key=lambda x: x["execution_time"])[0]
         print(f"🏆 WINNER DECLARED: {winner['workspace']}")
         print(f"🏆 METRIC: Passed Verilator/Cocotb tests in {winner['execution_time']:.2f} seconds.")
-        print(f"🏆 NEXT STEP: Passing {winner['workspace']}/design.sv to Digital Back-End (Yosys).")
+        
+        # --- WEEK 4: DIGITAL BACK-END TRIGGER ---
+        print(f"\n================ DIGITAL BACK-END (DBE) ================")
+        print(f"Passing {winner['workspace']}/design.sv to Yosys for synthesis...")
+        
+        synth_metrics = run_synthesis(winner['workspace'], module_name)
+        
+        if synth_metrics["status"] == "PASS":
+            print("✅ SYNTHESIS SUCCESS!")
+            print(f"📊 HARDWARE COST (AREA): {synth_metrics['gate_count']} Logic Gates")
+            print(f"⏱️  SYNTHESIS TIME: {synth_metrics['execution_time']:.2f} seconds")
+            
+            # --- TRIGGER OPENLANE PHYSICAL DESIGN ---
+            run_openlane(winner['workspace'], module_name)
+            
+        else:
+            print("❌ SYNTHESIS FAILED!")
+            print(f"Error Snippet: {synth_metrics['log_snippet']}")
+
     else:
         print("💀 ALL DESIGNS FAILED. Initiating LLM Critic Agent loop (To be built in Optimization Phase).")
+    # print("\n================ WINNER SELECTION ================")
+    # if passed_designs:
+    #     # Sort the passed designs by execution time (fastest compilation/simulation wins)
+    #     winner = sorted(passed_designs, key=lambda x: x["execution_time"])[0]
+    #     print(f"🏆 WINNER DECLARED: {winner['workspace']}")
+    #     print(f"🏆 METRIC: Passed Verilator/Cocotb tests in {winner['execution_time']:.2f} seconds.")
+    #     print(f"🏆 NEXT STEP: Passing {winner['workspace']}/design.sv to Digital Back-End (Yosys).")
+    # else:
+    #     print("💀 ALL DESIGNS FAILED. Initiating LLM Critic Agent loop (To be built in Optimization Phase).")
     #print("[SYSTEM] Dispatcher module loaded. Run this via the main CLI.")
     
     # cores = initialize_dispatcher()
