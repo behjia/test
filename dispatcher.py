@@ -71,7 +71,7 @@ if __name__ == "__main__":
         print(f"\n================ DIGITAL BACK-END (DBE) ================")
         print(f"Passing {winner['workspace']}/design.sv to Yosys for synthesis...")
         
-        synth_metrics = run_synthesis(winner['workspace'], module_name)
+        synth_metrics = run_synthesis(winner['workspace'], ['module_name'])
         
         if synth_metrics["status"] == "PASS":
             print("✅ SYNTHESIS SUCCESS!")
@@ -79,8 +79,8 @@ if __name__ == "__main__":
             print(f"⏱️  SYNTHESIS TIME: {synth_metrics['execution_time']:.2f} seconds")
             
             # --- TRIGGER OPENLANE PHYSICAL DESIGN ---
-            run_openlane(winner['workspace'], module_name)
-            
+            run_openlane(winner['workspace'], winner['module_name'])
+
         else:
             print("❌ SYNTHESIS FAILED!")
             print(f"Error Snippet: {synth_metrics['log_snippet']}")

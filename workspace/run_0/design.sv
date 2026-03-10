@@ -1,48 +1,44 @@
 module alu_4bit #(
   parameter WIDTH = 4
 ) (
-  input  [3:0] a,
-  input  [3:0] b,
-  input  [1:0] opcode,
-  output [3:0] result,
-  output [0:0] carry_out,
-  output [0:0] zero_flag
+  input wire [3:0] a,
+  input wire [3:0] b,
+  input wire [1:0] opcode,
+  input wire clk,
+  input wire rst_n,
+  output reg [3:0] result,
+  output reg carry_out,
+  output reg zero_flag
 );
 
-  logic [4:0] temp_result;
-  logic [3:0] alu_result;
+  reg [4:0] temp_result;
 
   always_comb begin
     case (opcode)
       2'b00: begin
-        // Addition
-        temp_result = {1'b0, a} + {1'b0, b};
-        alu_result = temp_result[3:0];
+        temp_result = a + b;
+        carry_out = temp_result[4];
       end
       2'b01: begin
-        // Subtraction
-        temp_result = {1'b0, a} - {1'b0, b};
-        alu_result = temp_result[3:0];
+        temp_result = a - b;
+        carry_out = (a < b) ? 1'b1 : 1'b0;
       end
       2'b10: begin
-        // AND
-        temp_result = {1'b0, (a & b)};
-        alu_result = temp_result[3:0];
+        temp_result = a & b;
+        carry_out = 1'b0;
       end
       2'b11: begin
-        // OR
-        temp_result = {1'b0, (a | b)};
-        alu_result = temp_result[3:0];
+        temp_result = a | b;
+        carry_out = 1'b0;
       end
       default: begin
         temp_result = 5'b0;
-        alu_result = 4'b0;
+        carry_out = 1'b0;
       end
     endcase
+    
+    result = temp_result[3:0];
+    zero_flag = (temp_result[3:0] == 4'b0) ? 1'b1 : 1'b0;
   end
-
-  assign result = alu_result;
-  assign carry_out = temp_result[4];
-  assign zero_flag = (alu_result == 4'b0) ? 1'b1 : 1'b0;
 
 endmodule

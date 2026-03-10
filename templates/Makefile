@@ -1,19 +1,36 @@
-# Use Icarus Verilog instead of Verilator
-SIM ?= icarus
+SIM ?= verilator
 TOPLEVEL_LANG ?= verilog
 
-# The Verilog source file to compile
 VERILOG_SOURCES += $(PWD)/design.sv
 
-# The Python testbench file
-#COCOTB_TEST_MODULES = test_alu
+# MODERN COCOTB 2.0 SYNTAX
 MODULE = test_alu
+export MODULE
+
+# We pass TOPLEVEL from the Python subprocess
 TOPLEVEL ?= alu
 
-# Tell Icarus to use SystemVerilog 2012 standards
-COMPILE_ARGS += -g2012
+# Suppress ALL linting warnings (Latches, Widths, Unused) so AI code compiles
+EXTRA_ARGS += --trace -Wno-fatal -Wno-lint -Wno-style -Wno-SYMRSVDWORD
 
 include $(shell cocotb-config --makefiles)/Makefile.sim
+# # Use Icarus Verilog instead of Verilator
+# SIM ?= icarus
+# TOPLEVEL_LANG ?= verilog
+
+# # The Verilog source file to compile
+# VERILOG_SOURCES += $(PWD)/design.sv
+
+# # The Python testbench file
+# #COCOTB_TEST_MODULES = test_alu
+# MODULE = test_alu
+# TOPLEVEL ?= alu
+
+# # Tell Icarus to use SystemVerilog 2012 standards
+# COMPILE_ARGS += -g2012
+
+# include $(shell cocotb-config --makefiles)/Makefile.sim
+
 # # Default to Verilator as the simulation engine
 # SIM ?= verilator
 # TOPLEVEL_LANG ?= verilog

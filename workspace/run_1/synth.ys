@@ -1,8 +1,0 @@
-
-read_verilog -sv design.sv
-hierarchy -check -top alu_4bit
-proc; opt; fsm; opt; memory; opt
-techmap; opt
-abc -g cmos2
-opt; clean
-stat
