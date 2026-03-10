@@ -120,13 +120,15 @@ class EDA_LLM_Client:
             prompt = f"""
             You are a master ASIC RTL designer. Implement the following module based STRICTLY on this JSON specification:
             {json.dumps(spec_dict, indent=2)}
-            
+
             {seed}
-            
+
             CRITICAL RULES:
-            1. Use SystemVerilog (Verilog-2001 acceptable).
-            2. Match the module name, input, and output ports EXACTLY as defined in the JSON.
-            3. Output ONLY the raw code. Do not explain anything.
+            1. This design must be PURELY COMBINATIONAL. Do NOT use clk, rst, or any sequential logic.
+            2. Use always_comb with logic type variables, or pure assign statements. Never use always @(posedge clk).
+            3. For Verilator compatibility: variables assigned inside always_comb MUST be declared as 'logic', NOT 'wire'.
+            4. The module must have ONLY these ports: a, b, opcode, result. No extra ports (no carry_out, no zero_flag, no clk, no rst_n).
+            5. Output ONLY the raw code. Do not explain anything.
             """
             
             try:
@@ -154,6 +156,71 @@ class EDA_LLM_Client:
                 variations.append(f"// Generation Failed: {e}")
                 
         return variations
+
+    def fix_design(self, broken_code: str, error_log: str, testbench_code: str = "") -> str:
+        """
+        Takes broken SystemVerilog code, its simulator error log, and optionally
+        the testbench, then returns a corrected version of the code.
+        """
+        print(f"[SYSTEM] Attempting auto-fix using {self.model_name}...")
+
+        fix_system_prompt = (
+            "You are a Senior Design Verification Engineer. "
+            "Your job is to analyze failed SystemVerilog code and the corresponding EDA simulator error log. "
+            "You must output ONLY the fully corrected raw SystemVerilog code. "
+            "Do not include markdown formatting, explanations, or conversational text.\n"
+            "CRITICAL CONSTRAINTS:\n"
+            "1. The design must be PURELY COMBINATIONAL. No clk, rst_n, or sequential logic.\n"
+            "2. Use always_comb or assign statements ONLY.\n"
+            "3. VERILATOR RULE: Any variable assigned inside always_comb MUST be declared as 'logic', NOT 'wire'. "
+            "Verilator will reject procedural assignments to wire (PROCASSWIRE error).\n"
+            "4. The module must have ONLY the ports the testbench uses. Do NOT add extra ports like carry_out or zero_flag "
+            "unless the testbench explicitly references them.\n"
+            "5. Do NOT use parameters unless the testbench uses them."
+        )
+
+        prompt = (
+            "The following SystemVerilog code has failed EDA verification.\n\n"
+            "--- BROKEN CODE ---\n"
+            f"{broken_code}\n\n"
+        )
+
+        if testbench_code:
+            prompt += (
+                "--- TESTBENCH (DO NOT MODIFY — your code must conform to this) ---\n"
+                f"{testbench_code}\n\n"
+            )
+
+        prompt += (
+            "--- SIMULATOR ERROR LOG ---\n"
+            f"{error_log}\n\n"
+            "Analyze the errors and output ONLY the fully corrected SystemVerilog code. "
+            "The module name, port names, and port widths MUST match what the testbench expects."
+        )
+
+        try:
+            response = self.client.messages.create(
+                model=self.model_name,
+                max_tokens=2048,
+                temperature=0.2,
+                system=fix_system_prompt,
+                messages=[{"role": "user", "content": prompt}]
+            )
+
+            raw_text = response.content[0].text
+
+            match = re.search(r"```(?:verilog|systemverilog)?(.*?)```", raw_text, re.DOTALL | re.IGNORECASE)
+            if match:
+                fixed_code = match.group(1).strip()
+            else:
+                fixed_code = raw_text.strip()
+
+            print("✅ SUCCESS: Corrected code generated.")
+            return fixed_code
+
+        except Exception as e:
+            print(f"❌ ERROR: Auto-fix failed: {e}")
+            return broken_code
 
 def setup_workspaces(variations: list, base_dir: str = "workspace"):
     """

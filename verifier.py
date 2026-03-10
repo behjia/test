@@ -22,7 +22,12 @@ def run_verification(workspace_dir: str, fallback_module_name: str) -> dict:
     shutil.copy("templates/test_alu.py", target_path / "test_alu.py")
     
     start_time = time.time()
-    
+        
+    # Clear Verilator build cache to force fresh compilation
+    sim_build = target_path / "sim_build"
+    if sim_build.exists():
+        shutil.rmtree(sim_build)
+
     # Pass the AUTO-DETECTED name to the Makefile
     result = subprocess.run(
         ["make", f"TOPLEVEL={actual_name}"],
@@ -33,6 +38,21 @@ def run_verification(workspace_dir: str, fallback_module_name: str) -> dict:
     
     execution_time = time.time() - start_time
     log_output = result.stdout + result.stderr
+
+    # After capturing log_output in verifier.py
+    lines = log_output.splitlines()
+
+    # Extract lines that actually describe failures
+    error_lines = [l for l in lines if any(kw in l.lower() for kw in 
+        ["error", "assert", "fail", "mismatch", "expected"])]
+
+    # Combine: meaningful errors first, then tail context
+    if error_lines:
+        focused_log = "[...KEY ERRORS EXTRACTED...]\n" + "\n".join(error_lines[-30:])
+        focused_log += "\n\n[...LAST 20 LINES...]\n" + "\n".join(lines[-20:])
+        log_output = focused_log
+    elif len(lines) > 50:
+        log_output = "[...TRUNCATED LOG...]\n" + "\n".join(lines[-50:])
     
     status = "PASS" if "PASS=1" in log_output and result.returncode == 0 else "FAIL"
         
