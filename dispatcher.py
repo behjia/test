@@ -29,7 +29,7 @@ if __name__ == "__main__":
     
     print("\n================ PHASE 1: DYNAMIC GENERATION ================")
     # 1. Ask for SEQUENTIAL LOGIC
-    test_request = "Design an 8-bit synchronous up-counter. It needs a 'clk', active-low 'rst_n', an 'enable' signal, and an 8-bit 'count' output."
+    test_request = "Design an 8-bit combinational multiplier. Inputs are 'a' and 'b' (8-bit). Output is 'p' (16-bit). Do not use a clock."
     
     # 2. Get the validated Pydantic HardwareSpec
     spec = ai_client.generate_spec(test_request)
@@ -69,8 +69,10 @@ if __name__ == "__main__":
             icon = "✅" if res["status"] == "PASS" else "❌"
             print(f"{icon} {res['workspace']} | Time: {res['execution_time']:.2f}s")
             if res["status"] == "FAIL":
-                print(f"    -> Error Snippet: {res['log'].splitlines()[-3:]}")
-
+                print(f"    -> Extracted Errors:")
+                # Print the FIRST 10 lines of the focused log, which contains the real errors
+                for line in res['log'].splitlines()[:10]:
+                    print(f"         {line}")
         if passed_designs:
             # Sort the passed designs by execution time
             winner = sorted(passed_designs, key=lambda x: x["execution_time"])[0]
@@ -95,7 +97,8 @@ if __name__ == "__main__":
                     testbench_code = f.read()
 
             # LLM auto-fix (Passes the code, the log, AND the testbench)
-            fixed_code = ai_client.fix_design(broken_code, best_failure["log"], testbench_code)
+            is_seq_flag = spec_dict.get("is_sequential", False)
+            fixed_code = ai_client.fix_design(broken_code, best_failure["log"], testbench_code, is_seq_flag)
 
             # Patch all workspaces for the next race
             for folder in run_folders:
@@ -117,7 +120,7 @@ if __name__ == "__main__":
             print(f"⏱️  SYNTHESIS TIME: {synth_metrics['execution_time']:.2f} seconds")
             
             print(f"\n[PHYSICAL DESIGN] Triggering OpenLane RTL-to-GDSII flow for {winner['module_name']}...")
-            openlane_metrics = run_openlane(winner['workspace'], winner["module_name"])
+            openlane_metrics = run_openlane(winner['workspace'], winner["module_name"], synth_metrics['gate_count'])
             print(openlane_metrics)
         else:
             print("❌ SYNTHESIS FAILED!")

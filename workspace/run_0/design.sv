@@ -1,28 +1,15 @@
-module sync_up_counter_8bit (
-  input  logic       clk,
-  input  logic       rst_n,
-  input  logic       enable,
-  output logic [7:0] count
+module multiplier_8bit (
+  input logic [7:0] a,
+  input logic [7:0] b,
+  output logic [15:0] p
 );
 
-  logic [7:0] count_next;
-
-  // Ripple-carry adder logic
+  logic [15:0] result;
+  
   always_comb begin
-    if (enable) begin
-      count_next = count + 8'd1;
-    end else begin
-      count_next = count;
-    end
+    result = a * b;
   end
-
-  // Sequential logic with active-low reset
-  always_ff @(posedge clk) begin
-    if (~rst_n) begin
-      count <= 8'd0;
-    end else begin
-      count <= count_next;
-    end
-  end
+  
+  assign p = result;
 
 endmodule

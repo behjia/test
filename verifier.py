@@ -38,13 +38,28 @@ def generate_testbench(spec_dict: dict, workspace_dir: Path) -> Path:
     # Fall back to "result" if the spec doesn't list outputs.
     outputs = spec_dict.get("outputs", [])
     output_name = outputs[0]["name"] if outputs else "result"
+    # --- SANITIZE THE GOLDEN MODEL ---
+    golden = spec_dict.get("golden_model_python", "def golden_model(inputs):\n    return 0")
+    if "```" in golden:
+        match = re.search(r"```(?:python)?\s*(.*?)\s*```", golden, re.DOTALL | re.IGNORECASE)
+        if match:
+            golden = match.group(1)
+        else:
+            golden = golden.replace("```", "")
+    
+    # Ensure it's passed safely to Jinja
+    outputs = spec_dict.get("outputs", [])
+    output_name = outputs[0]["name"] if outputs else "result"
+    
     rendered = template.render(
         module_name=spec_dict.get("module_name", "design"),
         inputs=spec_dict.get("inputs", []),
         output_name=output_name,
         test_vectors=spec_dict.get("test_vectors", []),
-        is_sequential=spec_dict.get("is_sequential", False)
+        is_sequential=spec_dict.get("is_sequential", False),
+        golden_model_python=golden  # <--- PASS SANITIZED CODE HERE
     )
+
     workspace_dir = Path(workspace_dir)
     workspace_dir.mkdir(parents=True, exist_ok=True)
     out_path = workspace_dir / "test_design.py"
