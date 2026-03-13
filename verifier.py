@@ -43,6 +43,7 @@ def generate_testbench(spec_dict: dict, workspace_dir: Path) -> Path:
         inputs=spec_dict.get("inputs", []),
         output_name=output_name,
         test_vectors=spec_dict.get("test_vectors", []),
+        is_sequential=spec_dict.get("is_sequential", False)
     )
     workspace_dir = Path(workspace_dir)
     workspace_dir.mkdir(parents=True, exist_ok=True)

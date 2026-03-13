@@ -1,18 +1,28 @@
-module alu_4bit (
-  input  logic [3:0] operand_a,
-  input  logic [3:0] operand_b,
-  input  logic [1:0] opcode,
-  output logic [3:0] result
+module sync_up_counter_8bit (
+  input  logic       clk,
+  input  logic       rst_n,
+  input  logic       enable,
+  output logic [7:0] count
 );
 
+  logic [7:0] count_next;
+
+  // Ripple-carry adder logic
   always_comb begin
-    case (opcode)
-      2'b00: result = operand_a + operand_b;
-      2'b01: result = operand_a - operand_b;
-      2'b10: result = operand_a & operand_b;
-      2'b11: result = operand_a | operand_b;
-      default: result = 4'b0000;
-    endcase
+    if (enable) begin
+      count_next = count + 8'd1;
+    end else begin
+      count_next = count;
+    end
+  end
+
+  // Sequential logic with active-low reset
+  always_ff @(posedge clk) begin
+    if (~rst_n) begin
+      count <= 8'd0;
+    end else begin
+      count <= count_next;
+    end
   end
 
 endmodule
