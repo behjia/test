@@ -12,7 +12,6 @@
             "moby": "false"
         }
     },
-    /*"postCreateCommand": "sudo apt-get update && sudo apt-get install -y build-essential make g++ graphviz gtkwave tcl tcllib tk iverilog yosys ngspice magic python3-venv git-lfs help2man autoconf flex bison ccache libfl2 libfl-dev zlibc zlib1g zlib1g-dev && pip install --upgrade pip && pip install cocotb ray pytest python-dotenv anthropic && (if [ ! -d '/usr/local/share/verilator' ]; then git clone https://github.com/verilator/verilator && cd verilator && git checkout stable && autoconf && ./configure && make -j 2 && sudo make install && cd .. && rm -rf verilator; fi) && (if [ ! -d 'OpenLane' ]; then git clone --depth 1 https://github.com/The-OpenROAD-Project/OpenLane.git && cd OpenLane && make; fi)",*/
     "postCreateCommand": "sudo apt-get update && sudo apt-get install -y build-essential make g++ graphviz gtkwave tcl tcllib tk iverilog yosys ngspice magic python3-venv git-lfs help2man autoconf flex bison ccache libfl2 libfl-dev zlib1g zlib1g-dev && pip install --upgrade pip && pip install cocotb ray pytest python-dotenv anthropic && (if [ ! -d '/usr/local/share/verilator' ]; then git clone https://github.com/verilator/verilator && cd verilator && git checkout stable && autoconf && ./configure && make -j 2 && sudo make install && cd .. && rm -rf verilator; fi) && (if [ ! -d 'OpenLane' ]; then git clone --depth 1 https://github.com/The-OpenROAD-Project/OpenLane.git && cd OpenLane && make; fi)",
     "customizations": {
         "vscode": {

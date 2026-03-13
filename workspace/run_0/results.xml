@@ -1,8 +1,6 @@
 <testsuites name="results">
   <testsuite name="all" package="all">
-    <property name="random_seed" value="1773114360" />
-    <testcase name="alu_basic_test" classname="test_alu" file="/workspaces/test/workspace/run_0/test_alu.py" lineno="4" time="0.0011069774627685547" sim_time_ns="1.001" ratio_time="904.2641188886495">
-      <failure />
-    </testcase>
+    <property name="random_seed" value="1773402451" />
+    <testcase name="alu_4bit_basic_test" classname="test_design" file="/workspaces/test/workspace/run_0/test_design.py" lineno="3" time="0.0013675689697265625" sim_time_ns="4.0" ratio_time="2924.8981868898186" />
   </testsuite>
 </testsuites>

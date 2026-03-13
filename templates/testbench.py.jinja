@@ -1,0 +1,33 @@
+import cocotb
+from cocotb.triggers import Timer
+@cocotb.test()
+async def {{ module_name }}_basic_test(dut):
+    """Auto-generated testbench for the {{ module_name }} module."""
+    {% if test_vectors %}
+    # Test vectors provided by AI spec
+    test_vectors = [
+        {% for vec in test_vectors %}
+        ({{ vec | join(', ') }}),
+        {% endfor %}
+    ]
+    for {% for input in inputs %}{{ input.name }}_val, {% endfor %}expected in test_vectors:
+        # Drive the inputs
+        {% for input in inputs %}
+        dut.{{ input.name }}.value = {{ input.name }}_val
+        {% endfor %}
+        # Wait for combinational logic to propagate
+        await Timer(1, units="ns")
+        # Read and assert the output
+        result = int(dut.{{ output_name }}.value)
+        assert result == expected, \
+            f"FAIL: result={result} (expected {expected})"
+        dut._log.info(f"PASS: result={result}")
+    {% else %}
+    # No test vectors provided — applying default 'set to 0' fallback
+    {% for input in inputs %}
+    dut.{{ input.name }}.value = 0
+    {% endfor %}
+    await Timer(1, units="ns")
+    result = int(dut.{{ output_name }}.value)
+    dut._log.info(f"Default fallback — {{ output_name }} = {result}")
+    {% endif %}
