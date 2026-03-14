@@ -1,50 +1,49 @@
-module sync_fifo_16x32 #(
-    parameter integer DEPTH = 16,
-    parameter integer WIDTH = 32
-)(
-    input  logic        clk,
-    input  logic        rst_n,
-    input  logic        write_en,
-    input  logic        read_en,
-    input  logic [31:0] data_in,
+module sync_fifo_16x32 (
+    input logic clk,
+    input logic rst_n,
+    input logic write_en,
+    input logic read_en,
+    input logic [31:0] data_in,
     output logic [31:0] data_out,
-    output logic        full,
-    output logic        empty
+    output logic full,
+    output logic empty
 );
 
-    logic [WIDTH-1:0] mem [0:DEPTH-1];
-    logic [$clog2(DEPTH):0] count;
-    logic [$clog2(DEPTH)-1:0] wr_ptr;
-    logic [$clog2(DEPTH)-1:0] rd_ptr;
+    logic [31:0] fifo_mem [15:0];
+    logic [4:0] count;
+    logic read_en_q;
 
-    assign full  = (count == DEPTH);
-    assign empty = (count == 0);
+    assign full = (count == 5'd16);
+    assign empty = (count == 5'd0);
 
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            count    <= '0;
-            wr_ptr   <= '0;
-            rd_ptr   <= '0;
-            data_out <= '0;
-        end else begin
-            if (write_en && !full) begin
-                mem[wr_ptr] <= data_in;
-                wr_ptr      <= wr_ptr + 1'b1;
+            count <= 5'd0;
+            read_en_q <= 1'b0;
+            data_out <= 32'd0;
+            for (int i = 0; i < 16; i++) begin
+                fifo_mem[i] <= 32'd0;
             end
-            
-            if (read_en && !empty) begin
-                data_out <= mem[rd_ptr];
-                rd_ptr   <= rd_ptr + 1'b1;
-            end else if (!empty) begin
-                data_out <= mem[rd_ptr];
-            end else begin
-                data_out <= '0;
+        end else begin
+            read_en_q <= read_en;
+
+            if (write_en && !full) begin
+                fifo_mem[count] <= data_in;
             end
 
-            if (write_en && !full && !(read_en && !empty)) begin
-                count <= count + 1'b1;
-            end else if (!(write_en && !full) && read_en && !empty) begin
-                count <= count - 1'b1;
+            if (read_en_q && !empty) begin
+                data_out <= fifo_mem[0];
+                for (int i = 0; i < 15; i++) begin
+                    fifo_mem[i] <= fifo_mem[i+1];
+                end
+                if (!(write_en && !full)) begin
+                    count <= count - 1'b1;
+                end
+            end else begin
+                data_out <= 32'd0;
+                if (write_en && !full) begin
+                    count <= count + 1'b1;
+                end
             end
         end
     end

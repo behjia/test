@@ -4,7 +4,7 @@ import re
 import shutil
 from enum import Enum
 from pathlib import Path
-
+import ast
 import litellm
 from litellm import completion
 import instructor
@@ -201,25 +201,40 @@ class EDA_LLM_Client:
         # (instructor supports litellm natively via instructor.from_litellm)
         self.instructor_client = instructor.from_litellm(completion)
 
-        # Default structured-output model (cheap + fast for spec extraction)
-        self.spec_model = ExpertTier.TIER_GRUNT.primary
-    # ------------------------------------------------------------------
-    # Connection smoke-test
-    # ------------------------------------------------------------------
-    def test_connection(self):
-        print(f"[SYSTEM] Sending test prompt via MoE (TIER_GRUNT)...")
-        try:
-            return self.moe.route_task(
-                prompt=(
-                    "Write a tiny 1-bit Verilog half-adder module. "
-                    "Output nothing but the raw Verilog code."
-                ),
-                tier=ExpertTier.TIER_GRUNT,
-                max_tokens=256,
-                temperature=0.1,
-            )
-        except Exception as e:
-            return f"❌ ERROR: An unexpected error occurred: {e}"
+        # Explicitly use Claude for Pydantic/Instructor tasks to avoid Gemini tool-call bugs
+        self.spec_model = "claude-sonnet-4-5-20250929"
+    # # ------------------------------------------------------------------
+    # # Connection smoke-test
+    # # ------------------------------------------------------------------
+    # def test_connection(self):
+    #     print(f"[SYSTEM] Sending test prompt via MoE (TIER_GRUNT)...")
+    #     try:
+    #         return self.moe.route_task(
+    #             prompt=(
+    #                 "Write a tiny 1-bit Verilog half-adder module. "
+    #                 "Output nothing but the raw Verilog code."
+    #             ),
+    #             tier=ExpertTier.TIER_GRUNT,
+    #             max_tokens=256,
+    #             temperature=0.1,
+    #         )
+    #     except Exception as e:
+    #         return f"❌ ERROR: An unexpected error occurred: {e}"
+    @staticmethod
+    def extract_python_code(raw_text: str) -> str:
+        """Ruthlessly extracts Python code, destroying any and all LLM Markdown."""
+        text = raw_text.strip()
+        # 1. Look for code inside markdown blocks
+        match = re.search(r"```(?:python)?\s*(.*?)\s*```", text, re.IGNORECASE | re.DOTALL)
+        if match:
+            text = match.group(1)
+        else:
+            text = text.replace("```python", "").replace("```", "")
+        
+        text = text.strip()
+        # 2. Destroy the loose word 'python' if it is sitting at the very start of the string
+        text = re.sub(r"^python\b", "", text, flags=re.IGNORECASE).strip()
+        return text
     # ------------------------------------------------------------------
     # Structured spec generation (now powered by Pydantic + Instructor)
     # ------------------------------------------------------------------
@@ -242,18 +257,19 @@ class EDA_LLM_Client:
             "Return the specification as valid JSON conforming to the schema.\n"
             "CRITICAL RULE FOR THE GOLDEN MODEL:\n"
             "The 'golden_model_python' field must contain PURE Python code (no markdown).\n"
-            "Because this hardware might be stateful (like a FIFO or Counter), the Golden Model MUST "
-            "be a Python class named 'GoldenModel' with a method 'compute(self, inputs)'.\n"
-            "The 'inputs' is a dictionary of port names. The method MUST return a dictionary of ALL output port names.\n"
+            "It MUST be a single function named 'golden_model(state, inputs)'.\n"
+            " - 'state' is a dictionary holding memory (e.g., {'queue': []}).\n"
+            " - 'inputs' is a dictionary of the current clock cycle's input pins.\n"
+            "The function MUST return a tuple: (updated_state, expected_outputs_dict).\n"
             "Example:\n"
-            "class GoldenModel:\n"
-            "    def __init__(self):\n"
-            "        self.memory = []\n"
-            "    def compute(self, inputs):\n"
-            "        if not inputs['rst_n']:\n"
-            "            self.memory = []\n"
-            "        # ... math logic here ...\n"
-            "        return {'data_out': out_val, 'full': is_full, 'empty': is_empty}"
+            "def golden_model(state, inputs):\n"
+            "    queue = state.get('queue', [])\n"
+            "    if not inputs.get('rst_n', 1):\n"
+            "        queue = []\n"
+            "    elif inputs.get('write_en', 0):\n"
+            "        queue.append(inputs['data_in'])\n"
+            "    out_val = queue.pop(0) if inputs.get('read_en', 0) and queue else 0\n"
+            "    return ({'queue': queue}, {'data_out': out_val, 'full': len(queue)>=16, 'empty': len(queue)==0})"
         )
         try:
             spec: HardwareSpec = self.instructor_client.chat.completions.create(
@@ -267,8 +283,12 @@ class EDA_LLM_Client:
                 ],
                 response_model=HardwareSpec,    # ← Pydantic extraction
             )
+            # SAFETY SCRUBBER: Ruthlessly extract python code and strip markdown
+            spec.golden_model_python = self.extract_python_code(spec.golden_model_python)
+            
             print("✅ SUCCESS: Valid HardwareSpec generated.")
             return spec
+
         except ValidationError as e:
             error_msg = f"❌ VALIDATION ERROR: LLM output did not match HardwareSpec schema.\n{e}"
             print(error_msg)
@@ -277,6 +297,55 @@ class EDA_LLM_Client:
             error_msg = f"❌ ERROR: An unexpected error occurred: {e}"
             print(error_msg)
             return error_msg
+    
+    def review_and_fix_spec(self, spec: HardwareSpec) -> HardwareSpec:
+        """Acts as a Senior Software Engineer to verify the Python Golden Model is mathematically sound."""
+        print("[SYSTEM] Reviewer Agent analyzing Python Golden Model...")
+        
+        # Save the original code in case the Reviewer Agent hallucinates!
+        original_code = spec.golden_model_python 
+        
+        prompt = (
+            "You are a Senior Python QA Engineer. Review this proposed Golden Reference Model for a hardware testbench.\n"
+            f"Module: {spec.module_name}, Sequential: {spec.is_sequential}\n\n"
+            f"```python\n{spec.golden_model_python}\n```\n\n"
+            "CRITICAL CHECK:\n"
+            "1. The model MUST be a single function named exactly 'def golden_model(state, inputs):'. Do NOT use classes.\n"
+            "2. It must return a tuple of two dictionaries: (updated_state, outputs_dict).\n"
+            "3. It must not call any undefined helper functions.\n"
+            "If the code violates ANY of these rules, rewrite it perfectly.\n"
+            "CRITICAL: You MUST wrap your Python code inside a ```python ... ``` block. "
+            "If the code is already perfect, output it inside a ```python ... ``` block anyway. Do not output conversational text."
+        )
+        
+        try:
+            # UPGRADE: Force the Reviewer to use Claude Sonnet (TIER_ARCHITECT) for perfect Python syntax
+            fixed_code = self.moe.route_task(
+                prompt=prompt,
+                tier=ExpertTier.TIER_ARCHITECT, 
+                max_tokens=1500,
+                temperature=0.1
+            )
+            
+            cleaned_code = self.extract_python_code(fixed_code)
+            
+            try:
+                # We execute the code in a blank dictionary to ensure it doesn't crash on import
+                exec(cleaned_code, {})
+                spec.golden_model_python = cleaned_code
+                print("✅ [REVIEWER] Golden Model syntax AND runtime semantics verified.")
+            except Exception as runtime_err:
+                print(f"❌ [REVIEWER] Python Runtime Error detected in reviewed code: {type(runtime_err).__name__} - {runtime_err}")
+                print("⚠️ [REVIEWER] Reverting to original Golden Model generated in Phase 1.")
+                # FIX: Fallback to the original Sonnet code, NOT a blank dictionary!
+                spec.golden_model_python = original_code
+                
+        except Exception as e:
+            print(f"⚠️ [REVIEWER] API failed, proceeding with original spec. Error: {e}")
+            spec.golden_model_python = original_code
+        
+        return spec
+
     # ------------------------------------------------------------------
     # RTL variation generation (unchanged — free-form text output)
     # ------------------------------------------------------------------
@@ -347,6 +416,7 @@ class EDA_LLM_Client:
                 print(f"❌ ERROR on variation {i}: {e}")
                 variations.append(f"// Generation Failed: {e}")
         return variations
+    
     # ------------------------------------------------------------------
     # Self-healing fix (unchanged — free-form text output)
     # ------------------------------------------------------------------

@@ -1,0 +1,34 @@
+#ifndef {{ module_name|upper }}_DRIVER_H
+#define {{ module_name|upper }}_DRIVER_H
+
+#include <stdint.h>
+
+// Base address of the IP assigned by Intel Qsys/Platform Designer
+#define {{ module_name|upper }}_BASE_ADDR 0xFF200000 
+
+// =========================================================================
+// AI-GENERATED HARDWARE MEMORY MAP
+// =========================================================================
+typedef struct {
+    {% set offset = 0 %}
+    {% for input in inputs %}
+    {% if 'clk' not in input.name and 'rst' not in input.name %}
+    volatile uint32_t {{ input.name }}; // Offset 0x{{ "%02X" % offset }}
+    {% set offset = offset + 4 %}
+    {% endif %}
+    {% endfor %}
+    
+    {% for output in outputs %}
+    volatile uint32_t {{ output.name }}; // Offset 0x{{ "%02X" % offset }} (Read-Only)
+    {% set offset = offset + 4 %}
+    {% endfor %}
+} {{ module_name }}_hw_t;
+
+// Pointer to interact with the hardware block
+#define {{ module_name|upper }}_HW (({{ module_name }}_hw_t *) {{ module_name|upper }}_BASE_ADDR)
+
+// Example Usage:
+// {{ module_name|upper }}_HW->{{ inputs[0].name }} = 0xFFFF;
+// uint32_t result = {{ module_name|upper }}_HW->{{ outputs[0].name }};
+
+#endif

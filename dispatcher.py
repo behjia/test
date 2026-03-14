@@ -1,6 +1,8 @@
 import ray
 import os
 import time
+import requests
+from telemetry import log_pipeline_run 
 from verifier import run_verification
 from llm_client import EDA_LLM_Client, setup_workspaces
 from models import HardwareSpec
@@ -25,19 +27,29 @@ def verify_design_worker(workspace_dir: str, fallback_module_name: str, spec_dic
     return run_verification(workspace_dir, fallback_module_name, spec_dict)
 
 if __name__ == "__main__":
+    global_start_time = time.time() # <-- ADD START TIMER
     cores = initialize_dispatcher()
     ai_client = EDA_LLM_Client()
     
     print("\n================ PHASE 1: DYNAMIC GENERATION ================")
     # 1. Ask for a sequential memory unit
-    test_request = "Design a 16-word by 32-bit synchronous FIFO buffer. It must include clk, rst_n, write_en, read_en, data_in [31:0], data_out [31:0], full, and empty flags."
+    # The Real Target: 1-bit MAC
+    test_request = (
+        "Design a 16-word by 32-bit synchronous FIFO buffer. "
+        "It must include clk, rst_n, write_en, read_en, data_in [31:0], data_out [31:0], full, and empty flags. "
+        "CRITICAL ARCHITECTURE RULE: This is a Standard FIFO, NOT a First-Word Fall-Through (FWFT) FIFO. "
+        "The 'data_out' port must output 0 if 'read_en' is 0. Data should only appear on 'data_out' on the clock cycle AFTER 'read_en' is asserted."
+    )
     
     # 2. Get the validated Pydantic HardwareSpec
     spec = ai_client.generate_spec(test_request)
     if not isinstance(spec, HardwareSpec):
         print(f"❌ Aborting pipeline due to Pydantic spec failure:\n{spec}")
         exit(1)
-        
+
+    # ---> NEW: RUN THE REVIEWER AGENT <---
+    spec = ai_client.review_and_fix_spec(spec)
+
     spec_dict = spec.model_dump()
     print(f"[{spec_dict['module_name']}] Sequential Mode: {spec_dict['is_sequential']}")
     
@@ -55,6 +67,7 @@ if __name__ == "__main__":
     print("\n================ PHASE 2: VERIFICATION & CRITIC RACE ================")
     MAX_RETRIES = 4
     winner = None
+    final_attempts = 0 # <-- Track for telemetry
 
     for attempt in range(MAX_RETRIES):
         print(f"\n--- ATTEMPT {attempt + 1}/{MAX_RETRIES} ---")
@@ -98,7 +111,7 @@ if __name__ == "__main__":
                 with open(tb_path, "r", encoding="utf-8") as f:
                     testbench_code = f.read()
 
-            # LLM auto-fix (Passes the code, the log, AND the testbench)
+            # ---> FIX: Pass retry_count=attempt to the Critic <---
             is_seq_flag = spec_dict.get("is_sequential", False)
             fixed_code = ai_client.fix_design(broken_code, best_failure["log"], testbench_code, is_seq_flag, retry_count=attempt)
 
@@ -108,7 +121,22 @@ if __name__ == "__main__":
                     f.write(fixed_code)
         else:
             print("\n💀 MAX RETRIES REACHED. Pipeline failed to generate working RTL.")
-
+    
+    # ---> NEW: TELEMETRY LOGGING <---
+    total_time = time.time() - global_start_time
+    final_status = "SUCCESS" if winner else "FAILED"
+    winner_path = winner['workspace'] if winner else "None"
+    
+    log_pipeline_run(
+        module_name=module_name, 
+        spec_model=ai_client.spec_model, 
+        is_sequential=spec_dict.get("is_sequential", False),
+        winner_workspace=winner_path,
+        attempts=final_attempts,
+        total_time=total_time,
+        final_status=final_status
+    )
+    
     # Only proceed to Back-End if we have a winner
     if winner:
         print(f"\n================ PHASE 3: DIGITAL BACK-END (DBE) ================")
@@ -125,41 +153,40 @@ if __name__ == "__main__":
             openlane_metrics = run_openlane(winner['workspace'], winner["module_name"], synth_metrics['gate_count'])
             print(openlane_metrics)
 
-            # ---------------------------------------------------------- #
-            # PHASE 4: PHYSICAL FPGA DEPLOYMENT (REMOTE API)             #
-            # ---------------------------------------------------------- #
-            import requests # Make sure to add this at the top of your file if not there
+            # # ---------------------------------------------------------- #
+            # # PHASE 4: PHYSICAL FPGA DEPLOYMENT (REMOTE API)             #
+            # # ---------------------------------------------------------- #
 
-            print(f"\n================ PHASE 4: PHYSICAL FPGA DEPLOYMENT ================")
-            print(f"[PHYSICAL DEPLOYMENT] Sending winner to Remote Windows Quartus Server...")
+            # print(f"\n================ PHASE 4: PHYSICAL FPGA DEPLOYMENT ================")
+            # print(f"[PHYSICAL DEPLOYMENT] Sending winner to Remote Windows Quartus Server...")
             
-            # Read the winning Verilog code
-            design_path = os.path.join(winner['workspace'], "design.sv")
-            with open(design_path, "r", encoding="utf-8") as f:
-                sv_code = f.read()
+            # # Read the winning Verilog code
+            # design_path = os.path.join(winner['workspace'], "design.sv")
+            # with open(design_path, "r", encoding="utf-8") as f:
+            #     sv_code = f.read()
 
-            # PASTE YOUR NGROK URL HERE:
-            NGROK_URL = "https://unsegregable-uncorrelatedly-sheryl.ngrok-free.dev"
+            # # PASTE YOUR NGROK URL HERE:
+            # NGROK_URL = "https://unsegregable-uncorrelatedly-sheryl.ngrok-free.dev"
 
-            payload = {
-                "module_name": module_name,
-                "systemverilog_code": sv_code
-            }
+            # payload = {
+            #     "module_name": module_name,
+            #     "systemverilog_code": sv_code
+            # }
 
-            try:
-                # Send the POST request to the Windows API
-                response = requests.post(f"{NGROK_URL}/compile", json=payload)
+            # try:
+            #     # Send the POST request to the Windows API
+            #     response = requests.post(f"{NGROK_URL}/compile", json=payload)
                 
-                if response.status_code == 200:
-                    quartus_result = response.json()
-                    if quartus_result["status"] == "success":
-                        print(f"\n✅ REMOTE QUARTUS SUCCESS — Synthesis Complete!")
-                        print(f"   Compile time : {quartus_result['execution_time']} seconds")
-                    else:
-                        print(f"\n❌ REMOTE QUARTUS FAILED.")
-                        print(f"   Compile time : {quartus_result['execution_time']} seconds")
-                        print(f"   Error tail   :\n{quartus_result.get('error_tail', 'No log provided')}")
-                else:
-                    print(f"❌ Server Error {response.status_code}: {response.text}")
-            except Exception as e:
-                print(f"❌ Connection failed! Is the Windows server and Ngrok running? Error: {e}")
+            #     if response.status_code == 200:
+            #         quartus_result = response.json()
+            #         if quartus_result["status"] == "success":
+            #             print(f"\n✅ REMOTE QUARTUS SUCCESS — Synthesis Complete!")
+            #             print(f"   Compile time : {quartus_result['execution_time']} seconds")
+            #         else:
+            #             print(f"\n❌ REMOTE QUARTUS FAILED.")
+            #             print(f"   Compile time : {quartus_result['execution_time']} seconds")
+            #             print(f"   Error tail   :\n{quartus_result.get('error_tail', 'No log provided')}")
+            #     else:
+            #         print(f"❌ Server Error {response.status_code}: {response.text}")
+            # except Exception as e:
+            #     print(f"❌ Connection failed! Is the Windows server and Ngrok running? Error: {e}")

@@ -10,34 +10,27 @@ from jinja2 import Environment, FileSystemLoader
 # regardless of the caller's working directory.
 # ---------------------------------------------------------------------------
 _TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
-def generate_templates(spec_dict: dict, workspace_dir: Path) -> Path:
-    """Renders the testbench AND the AXI4-Lite wrapper using Jinja2."""
-    env = Environment(
-        loader=FileSystemLoader(str(_TEMPLATES_DIR)),
-        keep_trailing_newline=True,
-    )
-    
-    workspace_dir = Path(workspace_dir)
-    workspace_dir.mkdir(parents=True, exist_ok=True)
-    
-    outputs = spec_dict.get("outputs", [])
-    output_name = outputs[0]["name"] if outputs else "result"
+def generate_templates(spec_dict: dict, workspace_dir: Path):
+    """Dynamically generates testbench, AXI wrappers, and C drivers."""
+    env = Environment(loader=FileSystemLoader(str(_TEMPLATES_DIR)))
     mod_name = spec_dict.get("module_name", "design")
 
-    # 1. RENDER TESTBENCH (Tests the naked core logic)
+    # ---> NEW: ISOLATE THE PYTHON GOLDEN MODEL <---
+    # Write the AI's python code to a completely separate file to avoid Jinja indentation corruption
+    golden_code = spec_dict.get("golden_model_python", "def golden_model(state, inputs):\n    return state, {}")
+    golden_path = workspace_dir / "golden_model.py"
+    golden_path.write_text(golden_code, encoding="utf-8")
+
+    # 1. RENDER TESTBENCH
     tb_template = env.get_template("testbench.py.jinja")
     tb_rendered = tb_template.render(
         module_name=mod_name,
         inputs=spec_dict.get("inputs", []),
-        outputs=spec_dict.get("outputs", []),   # <--- THIS IS THE MISSING LINE
-        output_name=output_name,
+        outputs=spec_dict.get("outputs", []),
         test_vectors=spec_dict.get("test_vectors", []),
-        is_sequential=spec_dict.get("is_sequential", False),
-        golden_model_python=spec_dict.get("golden_model_python", "def golden_model(inputs):\n    return 0")
+        is_sequential=spec_dict.get("is_sequential", False)
+        # Note: We deleted the golden_model_python injection here!
     )
-    # Sanitize markdown from python golden model if it slipped through
-    tb_rendered = re.sub(r"```(?:python)?\s*(.*?)\s*```", r"\1", tb_rendered, flags=re.DOTALL | re.IGNORECASE)
-    
     out_path = workspace_dir / "test_design.py"
     out_path.write_text(tb_rendered, encoding="utf-8")
     
@@ -52,7 +45,20 @@ def generate_templates(spec_dict: dict, workspace_dir: Path) -> Path:
     axi_path = workspace_dir / f"{mod_name}_axi.sv"
     axi_path.write_text(axi_rendered, encoding="utf-8")
 
+    # 3. RENDER BARE-METAL C FIRMWARE DRIVER
+    c_template_path = _TEMPLATES_DIR / "c_driver.h.jinja"
+    if c_template_path.exists():
+        c_template = env.get_template("c_driver.h.jinja")
+        c_rendered = c_template.render(
+            module_name=mod_name,
+            inputs=spec_dict.get("inputs", []),
+            outputs=spec_dict.get("outputs", [])
+        )
+        c_path = workspace_dir / f"{mod_name}_driver.h"
+        c_path.write_text(c_rendered, encoding="utf-8")
+
     return out_path
+
 def run_verification(workspace_dir: str, fallback_module_name: str,
                      spec_dict: dict | None = None) -> dict:
     """Run Verilator/cocotb verification inside *workspace_dir*.
