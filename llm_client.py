@@ -37,9 +37,9 @@ class ExpertTier(Enum):
                      where cheaper models have already failed. No fallback
                      (Opus is the ceiling).
     """
-    TIER_GRUNT     = ("gemini/gemini-1.5-flash",    "claude-3-5-haiku-latest")
-    TIER_CODER     = ("claude-3-5-sonnet-latest",   "gemini/gemini-1.5-pro")
-    TIER_ARCHITECT = ("claude-3-opus-latest",        None)   # No fallback
+    TIER_GRUNT     = ("gemini/gemini-3.1-flash-lite-preview",    "claude-haiku-4-5-20251001")
+    TIER_CODER     = ("gemini/gemini-3.1-pro-preview", "claude-sonnet-4-5-20250929")
+    TIER_ARCHITECT = ("claude-sonnet-4-5-20250929",        None)   # No fallback
 
     @property
     def primary(self) -> str:
@@ -239,16 +239,26 @@ class EDA_LLM_Client:
             "You are a systems architect. Convert the following user request "
             "into a strict hardware architecture specification.\n\n"
             f'User Request: "{user_request}"\n\n'
-            "Return the specification as valid JSON conforming to the schema. "
-            "CRITICAL: For the 'golden_model_python' field, output PURE Python code. "
-            "DO NOT wrap it in ```python markdown blocks. Do not use markdown at all. "
-            "The function MUST be named 'golden_model(inputs)' where 'inputs' is a dictionary containing the input port names. "
-            "Example for an ALU: 'def golden_model(inputs):\n    return (inputs[\"a\"] + inputs[\"b\"]) & 0xF'"
+            "Return the specification as valid JSON conforming to the schema.\n"
+            "CRITICAL RULE FOR THE GOLDEN MODEL:\n"
+            "The 'golden_model_python' field must contain PURE Python code (no markdown).\n"
+            "Because this hardware might be stateful (like a FIFO or Counter), the Golden Model MUST "
+            "be a Python class named 'GoldenModel' with a method 'compute(self, inputs)'.\n"
+            "The 'inputs' is a dictionary of port names. The method MUST return a dictionary of ALL output port names.\n"
+            "Example:\n"
+            "class GoldenModel:\n"
+            "    def __init__(self):\n"
+            "        self.memory = []\n"
+            "    def compute(self, inputs):\n"
+            "        if not inputs['rst_n']:\n"
+            "            self.memory = []\n"
+            "        # ... math logic here ...\n"
+            "        return {'data_out': out_val, 'full': is_full, 'empty': is_empty}"
         )
         try:
             spec: HardwareSpec = self.instructor_client.chat.completions.create(
                 model=self.spec_model,
-                max_tokens=512,
+                max_tokens=1500,                # Increased to handle complex FIFO Golden Models
                 max_retries=2,                  # instructor auto-retries on validation failure
                 temperature=0.1,
                 messages=[
@@ -272,7 +282,7 @@ class EDA_LLM_Client:
     # ------------------------------------------------------------------
     def generate_variations(self, spec: HardwareSpec | dict, num_variations: int = 3):
         spec_dict = spec.model_dump() if isinstance(spec, HardwareSpec) else spec
-        print(f"\n[SYSTEM] Generating {num_variations} RTL variations using {self.model_name}...")
+        print(f"\n[SYSTEM] Generating {num_variations} RTL variations using MoE Router (TIER_GRUNT)...")
         variations = []
         
         # 1. Check if the Planner Agent decided this needs a clock
@@ -326,6 +336,12 @@ class EDA_LLM_Client:
                 )
                 match = re.search(r"```(?:verilog|systemverilog)?(.*?)```", raw_text, re.DOTALL | re.IGNORECASE)
                 clean_verilog = match.group(1).strip() if match else raw_text.strip()
+                
+                # SAFETY SCRUBBER: Remove hallucinated backtick macros before saving
+                clean_verilog = clean_verilog.replace("`systemverilog\n", "")
+                clean_verilog = clean_verilog.replace("`verilog\n", "")
+                clean_verilog = clean_verilog.replace("`systemverilog", "") # Catch it without the newline just in case
+                
                 variations.append(clean_verilog)
             except Exception as e:
                 print(f"❌ ERROR on variation {i}: {e}")
@@ -434,6 +450,10 @@ class EDA_LLM_Client:
                 re.DOTALL | re.IGNORECASE,
             )
             fixed_code = match.group(1).strip() if match else raw_text.strip()
+            # SAFETY SCRUBBER: Remove hallucinated backtick macros
+            fixed_code = fixed_code.replace("`systemverilog\n", "")
+            fixed_code = fixed_code.replace("`verilog\n", "")
+            
             print("✅ SUCCESS: Corrected code generated.")
             return fixed_code
         except Exception as e:
@@ -484,286 +504,3 @@ if __name__ == "__main__":
             print("❌ ERROR: Variations list is empty.")
     else:
         print(f"\nAborting hardware generation due to spec failure:\n{spec}")
-# import os
-# import json
-# import re
-# import shutil
-# from pathlib import Path
-# import anthropic
-# import instructor
-# from dotenv import load_dotenv
-# from pydantic import ValidationError
-# from models import HardwareSpec
-# # Load local .env file if it exists
-# load_dotenv()
-# class EDA_LLM_Client:
-#     def __init__(self):
-#         """
-#         Initializes the Anthropic client securely using the injected environment variable.
-#         """
-#         self.api_key = os.getenv("ANTHROPIC_API_KEY")
-#         if not self.api_key:
-#             raise ValueError("CRITICAL: ANTHROPIC_API_KEY environment variable is not set.")
-#         # Raw Anthropic client for free-form generation (variations, fixes)
-#         self._raw_client = anthropic.Anthropic(api_key=self.api_key)
-#         # Instructor-patched client for structured Pydantic extraction
-#         self.client = instructor.from_anthropic(self._raw_client)
-#         self.model_name = "claude-haiku-4-5-20251001"
-#         self.system_prompt = (
-#             "You are an expert ASIC and FPGA Digital Design Engineer. "
-#             "Your job is to generate highly optimized, synthesizable SystemVerilog code. "
-#             "CRITICAL RULES:\n"
-#             "1. You must output ONLY the requested code or JSON. \n"
-#             "2. DO NOT include markdown formatting (like ```verilog or ```json) unless explicitly requested. \n"
-#             "3. DO NOT include conversational filler, greetings, or explanations. \n"
-#             "4. Ensure all modules have explicit input/output port width declarations."
-#         )
-#     # ------------------------------------------------------------------
-#     # Connection smoke-test
-#     # ------------------------------------------------------------------
-#     def test_connection(self):
-#         print(f"[SYSTEM] Sending test prompt to {self.model_name}...")
-#         try:
-#             response = self._raw_client.messages.create(
-#                 model=self.model_name,
-#                 max_tokens=256,
-#                 temperature=0.1,
-#                 system=self.system_prompt,
-#                 messages=[
-#                     {
-#                         "role": "user",
-#                         "content": "Write a tiny 1-bit Verilog half-adder module. "
-#                                    "Output nothing but the raw Verilog code.",
-#                     }
-#                 ],
-#             )
-#             return response.content[0].text
-#         except Exception as e:
-#             return f"❌ ERROR: An unexpected error occurred: {e}"
-#     # ------------------------------------------------------------------
-#     # Structured spec generation (now powered by Pydantic + Instructor)
-#     # ------------------------------------------------------------------
-#     def generate_spec(self, user_request: str) -> HardwareSpec | str:
-#         """Translate a natural-language hardware request into a validated
-#         ``HardwareSpec`` Pydantic model.
-#         Returns
-#         -------
-#         HardwareSpec
-#             On success — a fully-validated spec object.
-#         str
-#             On failure — a human-readable error message.
-#         """
-#         print(f"[SYSTEM] Translating request to HardwareSpec using {self.model_name}...")
-#         prompt = (
-#             "You are a systems architect. Convert the following user request "
-#             "into a strict hardware architecture specification.\n\n"
-#             f'User Request: "{user_request}"\n\n'
-#             "Return the specification as valid JSON conforming to the schema. "
-#             "CRITICAL: For the 'golden_model_python' field, output PURE Python code. "
-#             "DO NOT wrap it in ```python markdown blocks. Do not use markdown at all. "
-#             "The function MUST be named 'golden_model(inputs)' where 'inputs' is a dictionary containing the input port names. "
-#             "Example for an ALU: 'def golden_model(inputs):\n    return (inputs[\"a\"] + inputs[\"b\"]) & 0xF'"
-#         )
-#         try:
-#             spec: HardwareSpec = self.client.messages.create(
-#                 model=self.model_name,
-#                 max_tokens=512,
-#                 max_retries=2,                     # instructor auto-retries on validation failure
-#                 temperature=0.1,
-#                 system=self.system_prompt,
-#                 messages=[{"role": "user", "content": prompt}],
-#                 response_model=HardwareSpec,       # ← Pydantic extraction
-#             )
-#             print("✅ SUCCESS: Valid HardwareSpec generated.")
-#             return spec
-#         except ValidationError as e:
-#             error_msg = f"❌ VALIDATION ERROR: LLM output did not match HardwareSpec schema.\n{e}"
-#             print(error_msg)
-#             return error_msg
-#         except Exception as e:
-#             error_msg = f"❌ ERROR: An unexpected error occurred: {e}"
-#             print(error_msg)
-#             return error_msg
-#     # ------------------------------------------------------------------
-#     # RTL variation generation (unchanged — free-form text output)
-#     # ------------------------------------------------------------------
-#     def generate_variations(self, spec: HardwareSpec | dict, num_variations: int = 3):
-#         spec_dict = spec.model_dump() if isinstance(spec, HardwareSpec) else spec
-#         print(f"\n[SYSTEM] Generating {num_variations} RTL variations using {self.model_name}...")
-#         variations = []
-        
-#         # 1. Check if the Planner Agent decided this needs a clock
-#         is_seq = spec_dict.get("is_sequential", False)
-#         if is_seq:
-#             timing_rules = (
-#                 "1. This is a SEQUENTIAL design. You MUST include a 'clk' input.\n"
-#                 "2. Use standard synchronous design practices (always_ff @(posedge clk)).\n"
-#                 "3. Ensure proper reset behavior if an rst or rst_n port is specified."
-#             )
-#         else:
-#             timing_rules = (
-#                 "1. This design must be PURELY COMBINATIONAL. Do NOT use clk, rst, or any sequential logic.\n"
-#                 "2. Use always_comb with logic type variables, or pure assign statements.\n"
-#                 "3. Include an 'initial begin #1; end' block for Verilator VM_TIMING compatibility.\n"
-#                 "4. CRITICAL SYNTHESIS RULE: You MUST wrap any timing constructs (like #1) in an ifndef block so synthesis tools ignore them. Like this:\n"
-#                 "   `ifndef SYNTHESIS\n"
-#                 "   initial begin #1; end\n"
-#                 "   `endif"
-#             )
-
-#         # 2. Extract the dynamic DSE strategies generated by the Planner Agent
-#         strategies = spec_dict.get("dse_strategies", [
-#             "Write standard behavioral RTL.", "Focus on area.", "Focus on speed."
-#         ])
-
-#         for i in range(num_variations):
-#             seed = strategies[i] if i < len(strategies) else strategies[0]
-#             print(f"  -> Generating Variation {i + 1} (Strategy: {seed[:40]}...)")
-            
-#             prompt = f"""
-#             You are a master ASIC RTL designer. Implement the following module based STRICTLY on this JSON specification:
-#             {json.dumps(spec_dict, indent=2)}
-            
-#             STRATEGY FOR THIS VARIATION:
-#             {seed}
-            
-#             CRITICAL RULES:
-#             {timing_rules}
-#             4. The module must have ONLY the exact ports listed in the JSON. No extra ports.
-#             5. Output ONLY the raw SystemVerilog code. Do not explain anything.
-#             """
-#             try:
-#                 response = self._raw_client.messages.create(
-#                     model=self.model_name,
-#                     max_tokens=1024,
-#                     temperature=0.8,
-#                     system=self.system_prompt,
-#                     messages=[{"role": "user", "content": prompt}],
-#                 )
-#                 raw_text = response.content[0].text
-#                 match = re.search(r"```(?:verilog|systemverilog)?(.*?)```", raw_text, re.DOTALL | re.IGNORECASE)
-#                 clean_verilog = match.group(1).strip() if match else raw_text.strip()
-#                 variations.append(clean_verilog)
-#             except Exception as e:
-#                 print(f"❌ ERROR on variation {i}: {e}")
-#                 variations.append(f"// Generation Failed: {e}")
-#         return variations
-#     # ------------------------------------------------------------------
-#     # Self-healing fix (unchanged — free-form text output)
-#     # ------------------------------------------------------------------
-#     def fix_design(self, broken_code: str, error_log: str, testbench_code: str = "", is_sequential: bool = False) -> str:
-#         """Takes broken SystemVerilog code, its simulator error log, and
-#         optionally the testbench, then returns a corrected version.
-#         """
-#         print(f"[SYSTEM] Attempting auto-fix using {self.model_name}...")
-        
-#         # DYNAMIC CRITIC RULES
-#         if is_sequential:
-#             timing_rules = (
-#                 "1. The design is SEQUENTIAL. You MUST use 'always_ff @(posedge clk)' for state/memory.\n"
-#                 "2. Do NOT use 'assign' statements for variables updated inside an always_ff block.\n"
-#                 "3. Ensure synchronous or asynchronous reset logic matches standard industry practices."
-#             )
-#         else:
-#             timing_rules = (
-#                 "1. The design must be PURELY COMBINATIONAL. No clk, rst_n, or sequential logic.\n"
-#                 "2. Use always_comb or assign statements ONLY.\n"
-#                 "3. VERILATOR RULE: Any variable assigned inside always_comb MUST be declared as 'logic', NOT 'wire'."
-#             )
-
-#         fix_system_prompt = (
-#             "You are a Senior Design Verification Engineer. "
-#             "Your job is to analyze failed SystemVerilog code and the corresponding EDA simulator error log. "
-#             "You must output ONLY the fully corrected raw SystemVerilog code. "
-#             "Do not include markdown formatting, explanations, or conversational text.\n"
-#             "CRITICAL CONSTRAINTS:\n"
-#             f"{timing_rules}\n"
-#             "4. The module must have ONLY the ports the testbench uses. Do NOT add extra ports.\n"
-#             "5. Fix any MULTIDRIVEN, LATCH, or syntax errors reported by Verilator."
-#             "6. CRITICAL SYNTHESIS RULE: You MUST wrap any timing constructs (like #1) in an ifndef block so synthesis tools ignore them. Like this:\n"
-#             "   `ifndef SYNTHESIS\n"
-#             "   initial begin #1; end\n"
-#             "   `endif"
-#         )
-        
-#         prompt = (
-#             "The following SystemVerilog code has failed EDA verification.\n\n"
-#             "--- BROKEN CODE ---\n"
-#             f"{broken_code}\n\n"
-#         )
-#         if testbench_code:
-#             prompt += (
-#                 "--- TESTBENCH (DO NOT MODIFY — your code must conform to this) ---\n"
-#                 f"{testbench_code}\n\n"
-#             )
-#         prompt += (
-#             "--- SIMULATOR ERROR LOG ---\n"
-#             f"{error_log}\n\n"
-#             "Analyze the errors and output ONLY the fully corrected SystemVerilog code. "
-#             "The module name, port names, and port widths MUST match what the testbench expects."
-#         )
-#         try:
-#             response = self._raw_client.messages.create(
-#                 model=self.model_name,
-#                 max_tokens=2048,
-#                 temperature=0.2,
-#                 system=fix_system_prompt,
-#                 messages=[{"role": "user", "content": prompt}],
-#             )
-#             raw_text = response.content[0].text
-#             match = re.search(
-#                 r"```(?:verilog|systemverilog)?(.*?)```",
-#                 raw_text,
-#                 re.DOTALL | re.IGNORECASE,
-#             )
-#             fixed_code = match.group(1).strip() if match else raw_text.strip()
-#             print("✅ SUCCESS: Corrected code generated.")
-#             return fixed_code
-#         except Exception as e:
-#             print(f"❌ ERROR: Auto-fix failed: {e}")
-#             return broken_code
-# # =========================================================================
-# # Workspace scaffolding (unchanged)
-# # =========================================================================
-# def setup_workspaces(variations: list, base_dir: str = "workspace"):
-#     """Creates isolated sandbox directories and saves each variation as
-#     ``design.sv`` in its respective folder.
-#     """
-#     print(f"\n[SYSTEM] Setting up isolated EDA workspaces in './{base_dir}'...")
-#     base_path = Path(base_dir)
-#     if base_path.exists():
-#         shutil.rmtree(base_path)
-#     base_path.mkdir(parents=True)
-#     saved_paths = []
-#     for idx, rtl_code in enumerate(variations):
-#         run_folder = base_path / f"run_{idx}"
-#         run_folder.mkdir()
-#         file_path = run_folder / "design.sv"
-#         file_path.write_text(rtl_code, encoding="utf-8")
-#         saved_paths.append(str(run_folder))
-#         print(f"  -> Saved Variation {idx + 1} to {file_path}")
-#     return saved_paths
-# # =========================================================================
-# # CLI smoke-test
-# # =========================================================================
-# if __name__ == "__main__":
-#     ai_client = EDA_LLM_Client()
-#     # 1. Ask for a 4-bit ALU
-#     test_request = (
-#         "Design a 4-bit ALU that can do addition, subtraction, AND, and OR "
-#         "operations. It needs a 2-bit opcode selector."
-#     )
-#     # 2. Get the validated HardwareSpec
-#     spec = ai_client.generate_spec(test_request)
-#     # 3. Generate hardware variations
-#     if isinstance(spec, HardwareSpec):
-#         print(f"\n📋 Validated spec: {spec.model_dump_json(indent=2)}")
-#         rtl_variations = ai_client.generate_variations(spec, num_variations=3)
-#         # 4. Save them to isolated folders
-#         if rtl_variations:
-#             sandbox_dirs = setup_workspaces(rtl_variations)
-#             print("\n✅ SUCCESS: Pipeline Complete. Variations are isolated and ready for Ray.")
-#         else:
-#             print("❌ ERROR: Variations list is empty.")
-#     else:
-#         print(f"\nAborting hardware generation due to spec failure:\n{spec}")

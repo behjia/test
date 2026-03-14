@@ -1,41 +1,52 @@
-module adder_4bit (
-  input logic [3:0] a,
-  input logic [3:0] b,
-  output logic [4:0] sum
+module sync_fifo_16x32 #(
+    parameter integer DEPTH = 16,
+    parameter integer WIDTH = 32
+)(
+    input  logic        clk,
+    input  logic        rst_n,
+    input  logic        write_en,
+    input  logic        read_en,
+    input  logic [31:0] data_in,
+    output logic [31:0] data_out,
+    output logic        full,
+    output logic        empty
 );
 
-  logic [4:0] carry;
-  logic [3:0] p;
-  logic [3:0] g;
+    logic [WIDTH-1:0] mem [0:DEPTH-1];
+    logic [$clog2(DEPTH):0] count;
+    logic [$clog2(DEPTH)-1:0] wr_ptr;
+    logic [$clog2(DEPTH)-1:0] rd_ptr;
 
-  // Generate propagate and generate signals
-  always_comb begin
-    p = a ^ b;
-    g = a & b;
-  end
+    assign full  = (count == DEPTH);
+    assign empty = (count == 0);
 
-  // Carry lookahead logic
-  always_comb begin
-    carry[0] = 1'b0;
-    carry[1] = g[0] | (p[0] & carry[0]);
-    carry[2] = g[1] | (p[1] & g[0]) | (p[1] & p[0] & carry[0]);
-    carry[3] = g[2] | (p[2] & g[1]) | (p[2] & p[1] & g[0]) | (p[2] & p[1] & p[0] & carry[0]);
-    carry[4] = g[3] | (p[3] & g[2]) | (p[3] & p[2] & g[1]) | (p[3] & p[2] & p[1] & g[0]) | (p[3] & p[2] & p[1] & p[0] & carry[0]);
-  end
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            count    <= '0;
+            wr_ptr   <= '0;
+            rd_ptr   <= '0;
+            data_out <= '0;
+        end else begin
+            if (write_en && !full) begin
+                mem[wr_ptr] <= data_in;
+                wr_ptr      <= wr_ptr + 1'b1;
+            end
+            
+            if (read_en && !empty) begin
+                data_out <= mem[rd_ptr];
+                rd_ptr   <= rd_ptr + 1'b1;
+            end else if (!empty) begin
+                data_out <= mem[rd_ptr];
+            end else begin
+                data_out <= '0;
+            end
 
-  // Sum calculation
-  always_comb begin
-    sum[0] = p[0] ^ carry[0];
-    sum[1] = p[1] ^ carry[1];
-    sum[2] = p[2] ^ carry[2];
-    sum[3] = p[3] ^ carry[3];
-    sum[4] = carry[4];
-  end
-
-  `ifndef SYNTHESIS
-  initial begin
-    #1;
-  end
-  `endif
+            if (write_en && !full && !(read_en && !empty)) begin
+                count <= count + 1'b1;
+            end else if (!(write_en && !full) && read_en && !empty) begin
+                count <= count - 1'b1;
+            end
+        end
+    end
 
 endmodule
