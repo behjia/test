@@ -8,6 +8,7 @@ from models import HardwareSpec
 # Note: Adjust these imports if your actual file names differ
 from synthesizer import run_synthesis
 from openlane_wrapper import run_openlane
+from quartus_wrapper import run_fpga_compilation
 
 # Suppress Ray's GPU warnings
 os.environ["RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO"] = "0"
@@ -28,8 +29,8 @@ if __name__ == "__main__":
     ai_client = EDA_LLM_Client()
     
     print("\n================ PHASE 1: DYNAMIC GENERATION ================")
-    # 1. Ask for a simple combinational math unit
-    test_request = "Design a 4-bit combinational adder. Inputs are 'a' and 'b' (4-bit). Output is 'sum' (5-bit). Do not use a clock."
+    # 1. Ask for a sequential memory unit
+    test_request = "Design a 16-word by 32-bit synchronous FIFO buffer. It must include clk, rst_n, write_en, read_en, data_in [31:0], data_out [31:0], full, and empty flags."
     
     # 2. Get the validated Pydantic HardwareSpec
     spec = ai_client.generate_spec(test_request)
@@ -122,6 +123,26 @@ if __name__ == "__main__":
             print(f"\n[PHYSICAL DESIGN] Triggering OpenLane RTL-to-GDSII flow for {winner['module_name']}...")
             openlane_metrics = run_openlane(winner['workspace'], winner["module_name"], synth_metrics['gate_count'])
             print(openlane_metrics)
+
+            # ---------------------------------------------------------- #
+            # PHASE 4: PHYSICAL FPGA DEPLOYMENT (Intel Quartus Prime)     #
+            # ---------------------------------------------------------- #
+            print(f"\n================ PHASE 4: PHYSICAL FPGA DEPLOYMENT ================")
+            print(f"[PHYSICAL DEPLOYMENT] Passing winner to Intel Quartus for .sof bitstream generation...")
+            print(f"  Target device : Cyclone V (5CSEMA5F31C6)")
+            print(f"  Top module    : {module_name}")
+            print(f"  Workspace     : {winner['workspace']}")
+
+            quartus_result = run_fpga_compilation(winner['workspace'], module_name)
+
+            if quartus_result["status"] == "success":
+                print(f"\n✅ QUARTUS SUCCESS — Bitstream generated!")
+                print(f"   SOF path     : {quartus_result['sof_path']}")
+                print(f"   Compile time : {quartus_result['execution_time']:.2f} seconds")
+            else:
+                print(f"\n❌ QUARTUS FAILED — No .sof generated.")
+                print(f"   Compile time : {quartus_result['execution_time']:.2f} seconds")
+                print(f"   Error tail   :\n{quartus_result['error_tail']}")
         else:
             print("❌ SYNTHESIS FAILED!")
             print(f"Error Snippet: {synth_metrics['log_snippet']}")
@@ -146,7 +167,6 @@ if __name__ == "__main__":
 #     print(f"[SYSTEM] Ray cluster active. Cores available: {num_cores}\n")
 #     return num_cores
 
-# # The parallel worker now receives the spec_dict to pass to Jinja2
 # @ray.remote(num_cpus=1)
 # def verify_design_worker(workspace_dir: str, fallback_module_name: str, spec_dict: dict):
 #     return run_verification(workspace_dir, fallback_module_name, spec_dict)
@@ -156,8 +176,8 @@ if __name__ == "__main__":
 #     ai_client = EDA_LLM_Client()
     
 #     print("\n================ PHASE 1: DYNAMIC GENERATION ================")
-#     # 1. Ask for the hardware. 
-#     test_request = "Design a 4-bit ALU that can do addition, subtraction, AND, and OR operations. It needs a 2-bit opcode selector."
+#     # 1. Ask for a simple combinational math unit
+#     test_request = "Design a 4-bit combinational adder. Inputs are 'a' and 'b' (4-bit). Output is 'sum' (5-bit). Do not use a clock."
     
 #     # 2. Get the validated Pydantic HardwareSpec
 #     spec = ai_client.generate_spec(test_request)
@@ -165,14 +185,8 @@ if __name__ == "__main__":
 #         print(f"❌ Aborting pipeline due to Pydantic spec failure:\n{spec}")
 #         exit(1)
         
-#     # Convert Pydantic model to dict for Jinja2 and add test vectors dynamically
 #     spec_dict = spec.model_dump()
-#     spec_dict["test_vectors"] = [
-#         (5, 3, 0, 8),
-#         (5, 3, 1, 2),
-#         (5, 3, 2, 1),
-#         (5, 3, 3, 7)
-#     ]
+#     print(f"[{spec_dict['module_name']}] Sequential Mode: {spec_dict['is_sequential']}")
     
 #     # 3. Generate RTL and isolate to workspaces
 #     rtl_variations = ai_client.generate_variations(spec, num_variations=3)
@@ -180,6 +194,7 @@ if __name__ == "__main__":
 #         print("❌ ERROR: Variations list is empty.")
 #         exit(1)
         
+#     # THIS is the line that was missing! It creates the folders.
 #     run_folders = setup_workspaces(rtl_variations)
 #     module_name = spec.module_name
 
@@ -202,8 +217,10 @@ if __name__ == "__main__":
 #             icon = "✅" if res["status"] == "PASS" else "❌"
 #             print(f"{icon} {res['workspace']} | Time: {res['execution_time']:.2f}s")
 #             if res["status"] == "FAIL":
-#                 print(f"    -> Error Snippet: {res['log'].splitlines()[-3:]}")
-
+#                 print(f"    -> Extracted Errors:")
+#                 # Print the FIRST 10 lines of the focused log, which contains the real errors
+#                 for line in res['log'].splitlines()[:10]:
+#                     print(f"         {line}")
 #         if passed_designs:
 #             # Sort the passed designs by execution time
 #             winner = sorted(passed_designs, key=lambda x: x["execution_time"])[0]
@@ -213,7 +230,6 @@ if __name__ == "__main__":
             
 #         if attempt < MAX_RETRIES - 1:
 #             print("\n💀 ALL DESIGNS FAILED. Initiating LLM Critic Agent loop...")
-#             # Select fastest failure as repair candidate
 #             best_failure = sorted(results, key=lambda x: x["execution_time"])[0]
 
 #             # Read broken code
@@ -229,7 +245,8 @@ if __name__ == "__main__":
 #                     testbench_code = f.read()
 
 #             # LLM auto-fix (Passes the code, the log, AND the testbench)
-#             fixed_code = ai_client.fix_design(broken_code, best_failure["log"], testbench_code)
+#             is_seq_flag = spec_dict.get("is_sequential", False)
+#             fixed_code = ai_client.fix_design(broken_code, best_failure["log"], testbench_code, is_seq_flag)
 
 #             # Patch all workspaces for the next race
 #             for folder in run_folders:
@@ -251,7 +268,7 @@ if __name__ == "__main__":
 #             print(f"⏱️  SYNTHESIS TIME: {synth_metrics['execution_time']:.2f} seconds")
             
 #             print(f"\n[PHYSICAL DESIGN] Triggering OpenLane RTL-to-GDSII flow for {winner['module_name']}...")
-#             openlane_metrics = run_openlane(winner['workspace'], winner["module_name"])
+#             openlane_metrics = run_openlane(winner['workspace'], winner["module_name"], synth_metrics['gate_count'])
 #             print(openlane_metrics)
 #         else:
 #             print("❌ SYNTHESIS FAILED!")
