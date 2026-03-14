@@ -10,61 +10,103 @@ from jinja2 import Environment, FileSystemLoader
 # regardless of the caller's working directory.
 # ---------------------------------------------------------------------------
 _TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
-def generate_testbench(spec_dict: dict, workspace_dir: Path) -> Path:
-    """Render templates/testbench.py.jinja into *workspace_dir*/test_design.py.
-    Parameters
-    ----------
-    spec_dict : dict
-        Must contain at minimum:
-            - module_name  : str
-            - inputs       : list[dict]   – each dict has at least a "name" key
-            - outputs      : list[dict]   – each dict has at least a "name" key
-        Optionally:
-            - test_vectors : list[tuple]  – each tuple is
-              (input1_val, input2_val, …, expected)
-    workspace_dir : Path
-        The worker's run directory (e.g. workspace/run_0/).
-    Returns
-    -------
-    Path
-        The absolute path to the rendered test_design.py file.
-    """
+def generate_templates(spec_dict: dict, workspace_dir: Path) -> Path:
+    """Renders the testbench AND the AXI4-Lite wrapper using Jinja2."""
     env = Environment(
         loader=FileSystemLoader(str(_TEMPLATES_DIR)),
         keep_trailing_newline=True,
     )
-    template = env.get_template("testbench.py.jinja")
-    # Pull the first output name for the assertion target.
-    # Fall back to "result" if the spec doesn't list outputs.
+    
+    workspace_dir = Path(workspace_dir)
+    workspace_dir.mkdir(parents=True, exist_ok=True)
+    
     outputs = spec_dict.get("outputs", [])
     output_name = outputs[0]["name"] if outputs else "result"
-    # --- SANITIZE THE GOLDEN MODEL ---
-    golden = spec_dict.get("golden_model_python", "def golden_model(inputs):\n    return 0")
-    if "```" in golden:
-        match = re.search(r"```(?:python)?\s*(.*?)\s*```", golden, re.DOTALL | re.IGNORECASE)
-        if match:
-            golden = match.group(1)
-        else:
-            golden = golden.replace("```", "")
-    
-    # Ensure it's passed safely to Jinja
-    outputs = spec_dict.get("outputs", [])
-    output_name = outputs[0]["name"] if outputs else "result"
-    
-    rendered = template.render(
-        module_name=spec_dict.get("module_name", "design"),
+    mod_name = spec_dict.get("module_name", "design")
+
+    # 1. RENDER TESTBENCH (Tests the naked core logic)
+    tb_template = env.get_template("testbench.py.jinja")
+    tb_rendered = tb_template.render(
+        module_name=mod_name,
         inputs=spec_dict.get("inputs", []),
         output_name=output_name,
         test_vectors=spec_dict.get("test_vectors", []),
         is_sequential=spec_dict.get("is_sequential", False),
-        golden_model_python=golden  # <--- PASS SANITIZED CODE HERE
+        golden_model_python=spec_dict.get("golden_model_python", "def golden_model(inputs):\n    return 0")
     )
-
-    workspace_dir = Path(workspace_dir)
-    workspace_dir.mkdir(parents=True, exist_ok=True)
+    # Sanitize markdown from python golden model if it slipped through
+    tb_rendered = re.sub(r"```(?:python)?\s*(.*?)\s*```", r"\1", tb_rendered, flags=re.DOTALL | re.IGNORECASE)
+    
     out_path = workspace_dir / "test_design.py"
-    out_path.write_text(rendered, encoding="utf-8")
+    out_path.write_text(tb_rendered, encoding="utf-8")
+    
+    # 2. RENDER AXI4-LITE WRAPPER (For FPGA Deployment)
+    axi_template = env.get_template("axi4_lite_wrapper.sv.jinja")
+    axi_rendered = axi_template.render(
+        module_name=mod_name,
+        inputs=spec_dict.get("inputs", []),
+        outputs=spec_dict.get("outputs", []),
+        is_sequential=spec_dict.get("is_sequential", False)
+    )
+    axi_path = workspace_dir / f"{mod_name}_axi.sv"
+    axi_path.write_text(axi_rendered, encoding="utf-8")
+
     return out_path
+# def generate_testbench(spec_dict: dict, workspace_dir: Path) -> Path:
+#     """Render templates/testbench.py.jinja into *workspace_dir*/test_design.py.
+#     Parameters
+#     ----------
+#     spec_dict : dict
+#         Must contain at minimum:
+#             - module_name  : str
+#             - inputs       : list[dict]   – each dict has at least a "name" key
+#             - outputs      : list[dict]   – each dict has at least a "name" key
+#         Optionally:
+#             - test_vectors : list[tuple]  – each tuple is
+#               (input1_val, input2_val, …, expected)
+#     workspace_dir : Path
+#         The worker's run directory (e.g. workspace/run_0/).
+#     Returns
+#     -------
+#     Path
+#         The absolute path to the rendered test_design.py file.
+#     """
+#     env = Environment(
+#         loader=FileSystemLoader(str(_TEMPLATES_DIR)),
+#         keep_trailing_newline=True,
+#     )
+#     template = env.get_template("testbench.py.jinja")
+#     # Pull the first output name for the assertion target.
+#     # Fall back to "result" if the spec doesn't list outputs.
+#     outputs = spec_dict.get("outputs", [])
+#     output_name = outputs[0]["name"] if outputs else "result"
+#     # --- SANITIZE THE GOLDEN MODEL ---
+#     golden = spec_dict.get("golden_model_python", "def golden_model(inputs):\n    return 0")
+#     if "```" in golden:
+#         match = re.search(r"```(?:python)?\s*(.*?)\s*```", golden, re.DOTALL | re.IGNORECASE)
+#         if match:
+#             golden = match.group(1)
+#         else:
+#             golden = golden.replace("```", "")
+    
+#     # Ensure it's passed safely to Jinja
+#     outputs = spec_dict.get("outputs", [])
+#     output_name = outputs[0]["name"] if outputs else "result"
+    
+#     rendered = template.render(
+#         module_name=spec_dict.get("module_name", "design"),
+#         inputs=spec_dict.get("inputs", []),
+#         output_name=output_name,
+#         test_vectors=spec_dict.get("test_vectors", []),
+#         is_sequential=spec_dict.get("is_sequential", False),
+#         golden_model_python=golden  # <--- PASS SANITIZED CODE HERE
+#     )
+
+#     workspace_dir = Path(workspace_dir)
+#     workspace_dir.mkdir(parents=True, exist_ok=True)
+#     out_path = workspace_dir / "test_design.py"
+#     out_path.write_text(rendered, encoding="utf-8")
+#     return out_path
 def run_verification(workspace_dir: str, fallback_module_name: str,
                      spec_dict: dict | None = None) -> dict:
     """Run Verilator/cocotb verification inside *workspace_dir*.
@@ -91,7 +133,7 @@ def run_verification(workspace_dir: str, fallback_module_name: str,
     if spec_dict is not None:
         # Ensure the spec knows the real module name
         spec_dict.setdefault("module_name", actual_name)
-        generate_testbench(spec_dict, target_path)
+        generate_templates(spec_dict, target_path)
     else:
         # Legacy fallback: copy the old static test file if it exists
         static_tb = _TEMPLATES_DIR / "test_alu.py"

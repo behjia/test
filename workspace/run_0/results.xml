@@ -1,6 +1,6 @@
 <testsuites name="results">
   <testsuite name="all" package="all">
-    <property name="random_seed" value="1773411179" />
-    <testcase name="multiplier_8bit_crv_test" classname="test_design" file="/workspaces/test/workspace/run_0/test_design.py" lineno="36" time="0.00785207748413086" sim_time_ns="100.0" ratio_time="12735.483087386894" />
+    <property name="random_seed" value="1773449865" />
+    <testcase name="adder_4bit_crv_test" classname="test_design" file="/workspaces/test/workspace/run_0/test_design.py" lineno="36" time="0.0069732666015625" sim_time_ns="100.0" ratio_time="14340.481400437637" />
   </testsuite>
 </testsuites>

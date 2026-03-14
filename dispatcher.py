@@ -28,8 +28,8 @@ if __name__ == "__main__":
     ai_client = EDA_LLM_Client()
     
     print("\n================ PHASE 1: DYNAMIC GENERATION ================")
-    # 1. Ask for SEQUENTIAL LOGIC
-    test_request = "Design an 8-bit combinational multiplier. Inputs are 'a' and 'b' (8-bit). Output is 'p' (16-bit). Do not use a clock."
+    # 1. Ask for a simple combinational math unit
+    test_request = "Design a 4-bit combinational adder. Inputs are 'a' and 'b' (4-bit). Output is 'sum' (5-bit). Do not use a clock."
     
     # 2. Get the validated Pydantic HardwareSpec
     spec = ai_client.generate_spec(test_request)
