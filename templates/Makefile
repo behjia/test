@@ -1,7 +1,7 @@
 SIM ?= verilator
 TOPLEVEL_LANG ?= verilog
 
-VERILOG_SOURCES += $(PWD)/design.sv
+VERILOG_SOURCES += $(PWD)/*.sv
 
 # MODERN COCOTB 2.0 SYNTAX
 COCOTB_TEST_MODULES = test_design

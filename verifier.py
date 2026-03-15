@@ -167,6 +167,13 @@ def run_verification(workspace_dir: str, fallback_module_name: str,
             shutil.copy(static_tb, target_path / "test_alu.py")
     # Copy the Makefile template
     shutil.copy(_TEMPLATES_DIR / "Makefile", target_path / "Makefile")
+    
+    # Bring shared verified IP into each workspace if available
+    ip_library = Path("ip_library")
+    if ip_library.exists():
+        print(f"[RAG] Copying {len(list(ip_library.glob('*.sv')))} IP files from {ip_library} into {target_path}")
+        for sv_file in ip_library.glob("*.sv"):
+            shutil.copy(sv_file, target_path / sv_file.name)
     # ----- CLEAR VERILATOR BUILD CACHE -----
     sim_build = target_path / "sim_build"
     if sim_build.exists():

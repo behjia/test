@@ -1,3 +1,5 @@
+from typing import List
+
 from pydantic import BaseModel, Field
 
 class PortSpec(BaseModel):
@@ -18,4 +20,22 @@ class HardwareSpec(BaseModel):
     dse_strategies: list[str] = Field(
         ..., min_length=3, max_length=3,
         description="List exactly 3 distinct microarchitecture implementation strategies."
+    )
+
+
+class SystemTask(BaseModel):
+    module_name: str = Field(..., description="Name of the RTL module being generated.")
+    prompt: str = Field(..., description="Detailed prompt to feed into the HardwareSpec generator.")
+    requires_dummy_oracle: bool = Field(
+        False,
+        description="If True, asks the verification oracle to return a pass-through/dummy model instead of a cycle-accurate simulation."
+    )
+
+
+class ArchitecturePlan(BaseModel):
+    is_complex: bool = Field(
+        ..., description="True if the overall request must be decomposed into multiple sub-modules."
+    )
+    tasks: List[SystemTask] = Field(
+        ..., description="Ordered list of tasks from bottom-level primitives up through the top-level integration."
     )

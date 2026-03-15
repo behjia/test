@@ -1,5 +1,5 @@
 import cocotb
-from cocotb.triggers import Timer, RisingEdge, ReadOnly
+from cocotb.triggers import Timer, RisingEdge, FallingEdge, ReadOnly
 import json
 import os
 import sys
@@ -50,7 +50,12 @@ async def {{ module_name }}_crv_test(dut):
     model_state = {}
 
     # 3. Retrieve the LLM's custom test vectors
-    test_vectors = generate_test_vectors()
+    try:
+        test_vectors = generate_test_vectors()
+        if not test_vectors:
+            raise ValueError("generate_test_vectors returned None or empty")
+    except Exception as e:
+        assert False, f"Python Golden Model crashed during test vector generation: {e}"
 
     # 4. CRV Loop
     for i, input_dict in enumerate(test_vectors):
@@ -69,7 +74,16 @@ async def {{ module_name }}_crv_test(dut):
         # Advance Simulation
         {% if is_sequential %}
         await RisingEdge(dut.clk)
-        await ReadOnly() # Wait for non-blocking assignments to settle
+        {% else %}
+        await Timer(1, unit="ns")
+        {% endif %}
+        
+        # Sample outputs after signals settle (Required for BOTH sequential and combinational)
+        await ReadOnly()
+        
+        # Exit ReadOnly phase safely before the next loop iteration starts
+        {% if is_sequential %}
+        await FallingEdge(dut.clk)
         {% else %}
         await Timer(1, unit="ns")
         {% endif %}

@@ -10,7 +10,7 @@ from litellm import completion
 import instructor
 from dotenv import load_dotenv
 from pydantic import ValidationError
-from models import HardwareSpec
+from models import ArchitecturePlan, HardwareSpec
 from rag_agent import HardwareRAG
 
 # Silence litellm's verbose success messages; keep warnings/errors
@@ -38,7 +38,7 @@ class ExpertTier(Enum):
                      where cheaper models have already failed. No fallback
                      (Opus is the ceiling).
     """
-    TIER_GRUNT     = ("gemini/gemini-3.1-flash-lite-preview",    "claude-haiku-4-5-20251001")
+    TIER_GRUNT     = ("gemini/gemini-3.1-pro-preview",    "claude-haiku-4-5-20251001")
     TIER_CODER     = ("claude-sonnet-4-5-20250929", "gemini/gemini-3.1-pro-preview")
     TIER_ARCHITECT = ("claude-sonnet-4-5-20250929",        None)   # No fallback
     # Preferred LiteLLM-native NVIDIA route:
@@ -236,7 +236,7 @@ class EDA_LLM_Client:
         self.instructor_client = instructor.from_litellm(completion)
 
         # Explicitly use Claude for Pydantic/Instructor tasks to avoid Gemini tool-call bugs
-        self.spec_model = "claude-sonnet-4-5-20250929"
+        self.spec_model = ExpertTier.TIER_GRUNT.primary
 
         # Optional RAG agent — set to None to disable context retrieval
         self.rag: HardwareRAG | None = rag
@@ -288,16 +288,17 @@ class EDA_LLM_Client:
         )
         try:
             spec: HardwareSpec = self.instructor_client.chat.completions.create(
-                model=self.spec_model,
-                max_tokens=8192,                # Increased to 8192
-                max_retries=2,                  # instructor auto-retries on validation failure
-                temperature=0.1,
-                messages=[
-                    {"role": "system", "content": self.system_prompt},
-                    {"role": "user",   "content": prompt},
-                ],
-                response_model=HardwareSpec,    # ← Pydantic extraction
-            )
+            model=ExpertTier.TIER_GRUNT.primary,
+            max_tokens=8192,
+            max_retries=2,
+            temperature=0.1,
+            messages=[
+                {"role": "system", "content": self.system_prompt},
+                {"role": "user",   "content": prompt},
+            ],
+            response_model=HardwareSpec,
+        )
+
             print("✅ SUCCESS: Valid HardwareSpec generated.")
             return spec
 
@@ -309,6 +310,76 @@ class EDA_LLM_Client:
             error_msg = f"❌ ERROR: An unexpected error occurred: {e}"
             print(error_msg)
             return error_msg
+
+    def decompose_architecture(self, user_request: str) -> ArchitecturePlan | str:
+        """Break complex CPU requests into a bottom-up task list."""
+        print(f"[SYSTEM] Decomposing architecture for request: {user_request[:80]}...")
+        ip_library_dir = "ip_library"
+        if os.path.isdir(ip_library_dir):
+            available_ips = [
+                os.path.splitext(filename)[0]
+                for filename in os.listdir(ip_library_dir)
+                if filename.endswith(".sv")
+            ]
+            catalog_entries = []
+            for json_path in os.listdir(ip_library_dir):
+                if not json_path.endswith(".json"):
+                    continue
+                try:
+                    with open(os.path.join(ip_library_dir, json_path), "r", encoding="utf-8") as fh:
+                        data = json.load(fh)
+                except Exception:
+                    continue
+                module_name = data.get("module_name")
+                description = data.get("description")
+                if module_name and description:
+                    catalog_entries.append(f"- {module_name}: {description}")
+            ip_catalog_text = "\n".join(catalog_entries)
+        else:
+            available_ips = []
+            ip_catalog_text = ""
+        prompt = (
+            "You are a Lead CPU Architect mapping user needs to a modular implementation plan.\n"
+            f"User Request: \"{user_request}\"\n"
+            f"AVAILABLE IP INVENTORY: {available_ips}.\n"
+            "AVAILABLE SEMANTIC IP CATALOG:\n"
+            f"{ip_catalog_text}\n"
+            "Return a JSON object conforming EXACTLY to the ArchitecturePlan schema.\n"
+            "Rules:\n"
+            "1. is_complex must be true when multiple modules are required (e.g., full CPU). "
+            "If the request is a single leaf like an ALU or oscillator, set is_complex to false and emit one task.\n"
+            "2. tasks must be ordered from bottom-level primitives up to the top-level integration.\n"
+            "3. Each task must include module_name, a highly specific prompt, and a boolean requires_dummy_oracle.\n"
+            "4. For any task that represents a top-level integration (e.g., the overall CPU), set requires_dummy_oracle to true so the verification oracle falls back to a pass-through model.\n"
+            "5. Keep prompts detailed enough for a HardwareSpec generator to implement the requested block.\n"
+            "6. INTELLIGENT REUSE: Compare your required sub-modules against the AVAILABLE IP INVENTORY. "
+            "Read the descriptions in the AVAILABLE SEMANTIC IP CATALOG. If an existing IP's description semantically fulfills a sub-module you need, you MUST reuse its exact module_name instead of inventing a new task. Do not duplicate existing functionality.\n"
+            "CRITICAL ARCHITECTURE RULES:\n"
+            " - DO NOT create tasks to generate RAM, ROM, Instruction Memory, Data Memory, or Caches. The top-level CPU core must instead expose standard memory interface ports (imem_addr, imem_rdata, dmem_addr, dmem_wdata, dmem_we) to communicate with external memory.\n"
+            " - Limit your decomposition strictly to the core processing elements (ProgramCounter, ALU, RegisterFile, ImmGen, ControlUnit, and the top-level integration).\n"
+        )
+        try:
+            plan: ArchitecturePlan = self.instructor_client.chat.completions.create(
+                model=ExpertTier.TIER_GRUNT.primary,
+                max_tokens=2048,
+                temperature=0.1,
+                messages=[
+                    {"role": "system", "content": "You are a Lead CPU Architect and decomposition expert."},
+                    {"role": "user", "content": prompt},
+                ],
+                response_model=ArchitecturePlan,
+            )
+
+            print("✅ Decomposition plan generated.")
+            return plan
+        except ValidationError as e:
+            error_msg = f"❌ VALIDATION ERROR: ArchitecturePlan schema mismatch.\n{e}"
+            print(error_msg)
+            return error_msg
+        except Exception as e:
+            error_msg = f"❌ ERROR: Failed to decompose architecture: {e}"
+            print(error_msg)
+            return error_msg
     
     def review_and_fix_spec(self, spec: HardwareSpec) -> HardwareSpec:
         """Placeholder reviewer for skeleton-first specs (no golden model included)."""
@@ -318,27 +389,73 @@ class EDA_LLM_Client:
     def generate_verification_oracle(self, spec_dict: dict, user_request: str) -> dict:
         """Generate the Python golden model/test vector pair in a second pass."""
         print("[SYSTEM] Generating verification oracle (golden model + test vectors)...")
-        prompt = (
+        base_prompt = (
             "You are a Senior Python QA Engineer. You have previously defined the RTL "
             "skeleton described below. Using that skeleton plus the original user "
             f"request: \"{user_request}\", write TWO extremely concise Python functions: "
             "`def golden_model(state, inputs)` and `def generate_test_vectors()`.\n"
             "Ensure:\n"
-            "1. All undefined opcodes produce outputs with every field set to 0.\n"
-            "2. `generate_test_vectors()` returns a list of dictionaries describing sequential cycles when `is_sequential` is true or combinational inputs otherwise.\n"
-            "3. The `golden_model(state, inputs)` MUST return exactly a tuple of TWO dictionaries: (updated_state, expected_outputs_dict).\n"
-            "4. Keep the code terse, avoid comments, and focus on bitwise/lookup logic.\n"
+            "1. CHAIN OF THOUGHT: Use standard # comments for your truth table to prevent AST parsing errors with string literals.\n"
+            "2. All undefined opcodes produce outputs with every field set to 0.\n"
+            "3. `generate_test_vectors()` returns a list of dictionaries describing sequential cycles when `is_sequential` is true or combinational inputs otherwise.\n"
+            "4. The `golden_model(state, inputs)` MUST return exactly a tuple of TWO dictionaries: (updated_state, expected_outputs_dict).\n"
+            "5. SAFE FALLBACKS: The golden_model MUST end with `return model_state, expected_output` covering any undefined inputs, and `generate_test_vectors()` MUST end with `return test_vectors` so a list is always returned even if your logic hits an unknown path.\n"
+            "6. TOKEN LIMIT AVOIDANCE: When writing `generate_test_vectors()`, DO NOT hardcode a massive list of 100 dictionaries. Hardcode 10 to 15 core edge-cases (e.g., valid RISC-V opcodes), and then use a Python for loop with the `random` module to append the remaining vectors. This prevents massive string truncation and bracket errors.\n"
+            "7. Keep the code terse, avoid extra comments beyond the required roadmap, and focus on bitwise/lookup logic.\n"
+            "8. CRITICAL STRUCTURE: You must use the exact skeleton below and return the required values. Do not wrap the functions in a class.\n"
+            "```python\n"
+            "def generate_test_vectors():\n"
+            "    test_vectors = []\n"
+            "    # Hardcode 10-15 edge cases here\n"
+            "    # Use a for loop to append random combinations up to 100\n"
+            "    return test_vectors\n\n"
+            "def golden_model(model_state, inputs):\n"
+            "    expected_output = {}\n"
+            "    # Your logic here. Default all outputs to 0 if the opcode is unknown!\n"
+            "    return model_state, expected_output\n"
+            "```\n"
+            "You MUST use exactly those function names, and you MUST return `test_vectors` and `model_state, expected_output`.\n"
+            "9. CRITICAL RULE: The `generate_test_vectors()` function MUST return a valid Python list of dictionaries. It absolutely CANNOT return None.\n"
+            "10. Include a fallback `return []` at the end so a list is always produced even if your logic fails.\n"
             "Hardware Skeleton (JSON):\n"
             f"{json.dumps(spec_dict, indent=2)}\n"
         )
-        raw_text = self.moe.route_task(
-            prompt=prompt,
-            tier=ExpertTier.TIER_CODER,
-            max_tokens=2048,
-            temperature=0.1,
-        )
-        extracted_code = self.extract_python_code(raw_text)
-        return {"golden_model_and_test_generator": extracted_code}
+
+        prompt_suffix = ""
+        for attempt in range(3):
+            final_prompt = base_prompt + prompt_suffix
+            raw_text = self.moe.route_task(
+                prompt=final_prompt,
+                tier=ExpertTier.TIER_CODER,
+                max_tokens=4096,
+                temperature=0.1,
+            )
+            clean_python = self.extract_python_code(raw_text)
+            try:
+                ast.parse(clean_python)
+                local_scope = {}
+                exec(clean_python, globals(), local_scope)
+                if "generate_test_vectors" not in local_scope or "golden_model" not in local_scope:
+                    raise ValueError("Missing required functions 'generate_test_vectors' or 'golden_model'.")
+                test_vecs = local_scope["generate_test_vectors"]()
+                if not isinstance(test_vecs, list) or len(test_vecs) < 5:
+                    raise ValueError(f"generate_test_vectors must return a list of at least 5 dictionaries. Got: {test_vecs}")
+                local_scope["golden_model"]({}, test_vecs[0])
+                return {"golden_model_and_test_generator": clean_python}
+            except SyntaxError as exc:
+                print(f"[SYSTEM] Oracle Python syntax error: {exc}. Retrying...")
+                prompt_suffix = (
+                    f"\nCRITICAL: Your Python code failed ast.parse() with SyntaxError: {exc}. "
+                    "Fix your commas, brackets, and indentation.\n"
+                )
+            except Exception as exc:
+                print(f"[SYSTEM] Oracle Python execution error: {exc}. Retrying...")
+                prompt_suffix = (
+                    f"\nCRITICAL: Your Python code passed syntax checks, but crashed during sandbox execution with: "
+                    f"{type(exc).__name__}: {exc}. Ensure you import any required libraries (like random or math) inside your functions, "
+                    "and verify your variable logic.\n"
+                )
+        raise ValueError("Unable to generate a syntax-valid Python oracle after 3 attempts.")
 
     # ------------------------------------------------------------------
     # RTL variation generation (unchanged — free-form text output)
@@ -374,6 +491,27 @@ class EDA_LLM_Client:
         strategies = spec_dict.get("dse_strategies", [
             "Write standard behavioral RTL.", "Focus on area.", "Focus on speed."
         ])
+        available_interfaces = ""
+        ip_dir = Path("ip_library")
+        if ip_dir.exists():
+            interface_lines = []
+            for json_path in sorted(ip_dir.glob("*.json")):
+                try:
+                    with open(json_path, "r", encoding="utf-8") as fh:
+                        data = json.load(fh)
+                except Exception:
+                    continue
+                module_name = data.get("module_name")
+                inputs = data.get("inputs")
+                outputs = data.get("outputs")
+                parameters = data.get("parameters")
+                if not module_name:
+                    continue
+                interface_lines.append(
+                    f"{module_name}: inputs={inputs}, outputs={outputs}, parameters={parameters}"
+                )
+            if interface_lines:
+                available_interfaces = "\n".join(interface_lines)
 
         # ------------------------------------------------------------------
         # 3. RAG CONTEXT RETRIEVAL
@@ -409,13 +547,38 @@ class EDA_LLM_Client:
         # disabled or no results) this degrades gracefully to the base prompt.
         augmented_system_prompt = self.system_prompt + rag_context_block
 
+        golden_model_code = spec_dict.get("golden_model_python")
+        if golden_model_code:
+            golden_alignment_block = (
+                "\n\nCRITICAL ALIGNMENT: Here is the Python Golden Model used for verification. "
+                "You MUST ensure your SystemVerilog internal signal encodings (like alu_control states) "
+                "perfectly match the integer values defined in this Python code!\n\n"
+                "```python\n"
+                f"{golden_model_code}\n"
+                "```\n"
+            )
+        else:
+            golden_alignment_block = ""
+
         for i in range(num_variations):
             seed = strategies[i] if i < len(strategies) else strategies[0]
             print(f"  -> Generating Variation {i + 1} (Strategy: {seed[:40]}...)")
 
+            wiring_context_block = ""
+            if available_interfaces:
+                wiring_context_block = (
+                    "\n\nCRITICAL WIRING CONTEXT: Here are the exact port interfaces for "
+                    "the sub-modules available in your IP library. If you instantiate any "
+                    "of these modules, you MUST wire them using EXACTLY these port names:\n"
+                    f"{available_interfaces}\n"
+                )
+
             prompt = f"""
             You are a master ASIC RTL designer. Implement the following module based STRICTLY on this JSON specification:
             {json.dumps(spec_dict, indent=2)}
+
+            {golden_alignment_block}
+            {wiring_context_block}
 
             STRATEGY FOR THIS VARIATION:
             {seed}
@@ -424,6 +587,11 @@ class EDA_LLM_Client:
             {timing_rules}
             4. The module must have ONLY the exact ports listed in the JSON. No extra ports.
             5. Output ONLY the raw SystemVerilog code. Do not explain anything.
+            
+            CRITICAL CODING STANDARDS:
+            - DO NOT use massive concatenated binary literals (e.g., 13'b100...). Assign signals individually, or use cleanly formatted localparam definitions for states and opcodes to prevent bit-counting errors.
+            - CHAIN OF THOUGHT: For complex logic like decoders or control units, you MUST write a brief Truth Table or Logic Map in Verilog comments (//) immediately before the always_comb block to plan your routing.
+            - Always include a default: case in case statements that safely sets all outputs to 0.
             """
             try:
                 raw_text = self.moe.route_task(
@@ -516,11 +684,12 @@ class EDA_LLM_Client:
             f"{timing_rules}\n"
             "4. The module must have ONLY the ports the testbench uses. Do NOT add extra ports.\n"
             "5. Fix any MULTIDRIVEN, LATCH, or syntax errors reported by Verilator.\n"
-            "6. CRITICAL SYNTHESIS RULE: You MUST wrap any timing constructs (like #1) in an ifndef block so synthesis tools ignore them. Like this:\n"
+            "6. ORACLE OBEDIENCE: If the simulator error log shows a mismatch between your Hardware Output and the Golden Model Expected output, you MUST modify your SystemVerilog to perfectly match the Golden Model's expected integers, even if you believe the Golden Model is architecturally incorrect. You MUST output the modified code wrapped in a systemverilog block.\n"
+            "7. CRITICAL SYNTHESIS RULE: You MUST wrap any timing constructs (like #1) in an ifndef block so synthesis tools ignore them. Like this:\n"
             "   `ifndef SYNTHESIS\n"
             "   initial begin #1; end\n"
             "   `endif\n"
-            "7. You MUST wrap the corrected RTL in a ```systemverilog ... ``` block (explanations may precede it)."
+            "8. You MUST wrap the corrected RTL in a ```systemverilog ... ``` block (explanations may precede it)."
         )
 
         prompt = (
