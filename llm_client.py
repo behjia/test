@@ -326,7 +326,7 @@ class EDA_LLM_Client:
             "Ensure:\n"
             "1. All undefined opcodes produce outputs with every field set to 0.\n"
             "2. `generate_test_vectors()` returns a list of dictionaries describing sequential cycles when `is_sequential` is true or combinational inputs otherwise.\n"
-            "3. You output PURE Python code wrapped inside a single ```python ... ``` block.\n"
+            "3. The `golden_model(state, inputs)` MUST return exactly a tuple of TWO dictionaries: (updated_state, expected_outputs_dict).\n"
             "4. Keep the code terse, avoid comments, and focus on bitwise/lookup logic.\n"
             "Hardware Skeleton (JSON):\n"
             f"{json.dumps(spec_dict, indent=2)}\n"
@@ -509,8 +509,9 @@ class EDA_LLM_Client:
         fix_system_prompt = (
             "You are a Senior Design Verification Engineer. "
             "Your job is to analyze failed SystemVerilog code and the corresponding EDA simulator error log. "
-            "You must output ONLY the fully corrected raw SystemVerilog code. "
-            "Do not include markdown formatting, explanations, or conversational text.\n"
+            "You must output ONLY the fully corrected raw SystemVerilog code.\n"
+            "CRITICAL: You may provide a brief explanation before the code block, but "
+            "the corrected code MUST be wrapped inside a ```systemverilog ... ``` block.\n"
             "CRITICAL CONSTRAINTS:\n"
             f"{timing_rules}\n"
             "4. The module must have ONLY the ports the testbench uses. Do NOT add extra ports.\n"
@@ -518,7 +519,8 @@ class EDA_LLM_Client:
             "6. CRITICAL SYNTHESIS RULE: You MUST wrap any timing constructs (like #1) in an ifndef block so synthesis tools ignore them. Like this:\n"
             "   `ifndef SYNTHESIS\n"
             "   initial begin #1; end\n"
-            "   `endif"
+            "   `endif\n"
+            "7. You MUST wrap the corrected RTL in a ```systemverilog ... ``` block (explanations may precede it)."
         )
 
         prompt = (
@@ -551,7 +553,10 @@ class EDA_LLM_Client:
                 raw_text,
                 re.DOTALL | re.IGNORECASE,
             )
-            fixed_code = match.group(1).strip() if match else raw_text.strip()
+            if not match:
+                print("    [CRITIC] Warning: no Verilog code block detected; returning broken code.")
+                return broken_code
+            fixed_code = match.group(1).strip()
             # SAFETY SCRUBBER: Remove hallucinated backtick macros
             fixed_code = fixed_code.replace("`systemverilog\n", "")
             fixed_code = fixed_code.replace("`verilog\n", "")

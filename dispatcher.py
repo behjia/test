@@ -127,6 +127,9 @@ if __name__ == "__main__":
             if any(err in failure_log for err in ["Python Golden Model crashed", "NameError", "ValueError"]):
                 print("❌ Python Testbench Bug Detected. Aborting Critic Loop to save tokens.")
                 break
+            if ("SyntaxError:" in failure_log or "Traceback (most recent call last):" in failure_log) and "%Error:" not in failure_log:
+                print("[SYSTEM] Python Oracle syntax error detected. Aborting Critic Loop to prevent Verilog corruption.")
+                break
 
             # Read broken code
             design_path = os.path.join(best_failure["workspace"], "design.sv")

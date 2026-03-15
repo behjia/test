@@ -96,5 +96,8 @@ async def {{ module_name }}_crv_test(dut):
             failure_path = Path("failure_context.json")
             failure_path.write_text(json.dumps(failure_payload, indent=2), encoding="utf-8")
             raise
+        {% if is_sequential %}
+        await FallingEdge(dut.clk)
+        {% endif %}
                 
     dut._log.info(f"✅ CRV PASSED: 100 Custom Vectors Verified against Python Golden Model.")
