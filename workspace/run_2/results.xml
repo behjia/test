@@ -1,6 +1,0 @@
-<testsuites name="results">
-  <testsuite name="all" package="all">
-    <property name="random_seed" value="1773555820" />
-    <testcase name="riscv_instruction_decoder_crv_test" classname="test_design" file="/workspaces/test/workspace/run_2/test_design.py" lineno="20" time="0.005450725555419922" sim_time_ns="100.0" ratio_time="18346.181436444756" />
-  </testsuite>
-</testsuites>

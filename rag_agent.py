@@ -25,9 +25,8 @@ Usage
 from __future__ import annotations
 
 import os
-import textwrap
 from pathlib import Path
-from typing import List
+from typing import Dict, List, Optional
 
 import chromadb
 from chromadb.utils import embedding_functions
@@ -44,8 +43,8 @@ _CHROMA_PERSIST_DIR = os.getenv("HARDWARE_RAG_DIR", "./hardware_rag_db")
 # accurate for dense technical text retrieval.
 _EMBED_MODEL = os.getenv("HARDWARE_RAG_EMBED_MODEL", "all-MiniLM-L6-v2")
 
-# ChromaDB collection name
-_COLLECTION_NAME = "hardware_specs"
+# Default ChromaDB collection name
+_DEFAULT_COLLECTION_NAME = "hardware_specs"
 
 # How many characters per chunk when splitting documents.
 _CHUNK_SIZE = 500
@@ -85,6 +84,7 @@ class HardwareRAG:
         self,
         persist_dir: str = _CHROMA_PERSIST_DIR,
         embed_model: str = _EMBED_MODEL,
+        collections: List[str] | None = None,
     ):
         print(f"[RAG] Initialising ChromaDB at: {persist_dir}")
         print(f"[RAG] Embedding model         : {embed_model}")
@@ -97,22 +97,25 @@ class HardwareRAG:
             model_name=embed_model
         )
 
-        # Get or create the collection (idempotent).
-        self._collection = self._client.get_or_create_collection(
-            name=_COLLECTION_NAME,
-            embedding_function=self._embed_fn,
-            metadata={"hnsw:space": "cosine"},   # cosine similarity for text
-        )
+        # Initialize collections
+        requested_collections = collections or [_DEFAULT_COLLECTION_NAME]
+        self._default_collection = requested_collections[0]
+        self._collections: Dict[str, chromadb.api.models.Collection] = {}
 
-        doc_count = self._collection.count()
-        print(f"[RAG] Collection '{_COLLECTION_NAME}' ready. "
-              f"Documents in store: {doc_count}\n")
+        for name in requested_collections:
+            _ = self._collection_for(name)
+
+        # Report status for each collection
+        for name, collection in self._collections.items():
+            doc_count = collection.count()
+            print(f"[RAG] Collection '{name}' ready. Documents in store: {doc_count}")
+        print()
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
-    def ingest_document(self, filepath: str) -> int:
+    def ingest_document(self, filepath: str, collection_name: Optional[str] = None) -> int:
         """Read a plain-text specification file and add its chunks to ChromaDB.
 
         The document is split into overlapping fixed-size chunks so that
@@ -139,7 +142,8 @@ class HardwareRAG:
         if not path.is_file():
             raise FileNotFoundError(f"[RAG] Spec file not found: {filepath}")
 
-        print(f"[RAG] Ingesting: {path.name}")
+        target_collection = self._collection_for(collection_name)
+        print(f"[RAG] Ingesting: {path.name} into '{self._collection_name(collection_name)}'")
         raw_text = path.read_text(encoding="utf-8", errors="replace")
 
         chunks = self._split_text(raw_text)
@@ -152,17 +156,20 @@ class HardwareRAG:
         metadatas  = [{"source": path.name, "chunk": i} for i in range(len(chunks))]
 
         # upsert is idempotent — safe to re-ingest updated documents
-        self._collection.upsert(
+        target_collection.upsert(
             ids=ids,
             documents=chunks,
             metadatas=metadatas,
         )
 
-        print(f"[RAG] ✅ Stored {len(chunks)} chunks from '{path.name}'. "
-              f"Total in DB: {self._collection.count()}")
+        print(
+            f"[RAG] ✅ Stored {len(chunks)} chunks from '{path.name}'. "
+            f"Total in '{self._collection_name(collection_name)}': {target_collection.count()}"
+        )
         return len(chunks)
 
-    def retrieve_context(self, query: str, n_results: int = 3) -> str:
+    def retrieve_context(self, query: str, n_results: int = 3,
+                         collection_name: Optional[str] = None) -> str:
         """Query the vector DB and return the top-N matching spec rules.
 
         Parameters
@@ -181,14 +188,18 @@ class HardwareRAG:
             LLM system prompt.  Returns an empty string when the
             collection is empty.
         """
-        if self._collection.count() == 0:
-            print("[RAG] ⚠️  Collection is empty. Inject spec files first via ingest_document().")
+        target_collection = self._collection_for(collection_name)
+        if target_collection.count() == 0:
+            print(
+                f"[RAG] ⚠️  Collection '{self._collection_name(collection_name)}' is empty. "
+                "Inject documents first via ingest_document()."
+            )
             return ""
 
         # Clamp n_results to however many docs we actually have
-        n_results = min(n_results, self._collection.count())
+        n_results = min(n_results, target_collection.count())
 
-        results = self._collection.query(
+        results = target_collection.query(
             query_texts=[query],
             n_results=n_results,
             include=["documents", "metadatas", "distances"],
@@ -213,18 +224,38 @@ class HardwareRAG:
             )
 
         formatted = "\n\n".join(lines)
-        print(f"[RAG] Retrieved {len(retrieved_chunks)} rules for query: '{query[:60]}...'")
+        print(
+            f"[RAG] Retrieved {len(retrieved_chunks)} rules for query: '{query[:60]}...'"
+        )
         return formatted
 
-    def list_sources(self) -> List[str]:
+    def list_sources(self, collection_name: Optional[str] = None) -> List[str]:
         """Return the unique filenames currently stored in the collection."""
-        if self._collection.count() == 0:
+        target_collection = self._collection_for(collection_name)
+        if target_collection.count() == 0:
             return []
-        all_meta = self._collection.get(include=["metadatas"])["metadatas"]
+        all_meta = target_collection.get(include=["metadatas"])["metadatas"]
         return sorted({m["source"] for m in all_meta if "source" in m})
 
     # ------------------------------------------------------------------
     # Private helpers
+    # ------------------------------------------------------------------
+
+    def _collection_name(self, name: Optional[str]) -> str:
+        return name or self._default_collection
+
+    def _collection_for(self, name: Optional[str] = None):
+        actual_name = self._collection_name(name)
+        if actual_name not in self._collections:
+            self._collections[actual_name] = self._client.get_or_create_collection(
+                name=actual_name,
+                embedding_function=self._embed_fn,
+                metadata={"hnsw:space": "cosine"},
+            )
+        return self._collections[actual_name]
+
+    # ------------------------------------------------------------------
+    # Text helpers
     # ------------------------------------------------------------------
 
     @staticmethod

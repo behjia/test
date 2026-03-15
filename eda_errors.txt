@@ -1,0 +1,21 @@
+# EDA Diagnostic Manual: Verilator and Cocotb Errors
+
+%Error: MULTIDRIVEN
+Cause: A signal is being driven by multiple 'assign' statements or multiple 'always' blocks. 
+Fix: In SystemVerilog, a 'logic' or 'wire' can only be driven by a single continuous assignment (assign) or a single procedural block (always_comb, always_ff). Combine the logic into a single always_comb block using an if/else or case statement.
+
+%Error: LATCH
+Cause: An 'always_comb' block does not assign a value to a variable in every possible logical branch (e.g., missing a 'default' case or an 'else' branch). This infers a memory latch instead of combinational logic.
+Fix: Ensure every variable written inside the 'always_comb' block is assigned a value in every single execution path, or assign a default value to all variables at the very top of the 'always_comb' block.
+
+%Error: PROCASSWIRE
+Cause: A signal declared as a 'wire' is being assigned a value inside an 'always', 'always_comb', or 'always_ff' procedural block.
+Fix: Change the signal declaration from 'wire' to 'logic'. In SystemVerilog, variables assigned inside procedural blocks MUST be of type 'logic' or 'reg'.
+
+%Error: BLKANDNBLK
+Cause: The code mixes blocking (=) and non-blocking (<=) assignments to the same variable, or uses the wrong type of assignment for the block.
+Fix: Rule 1: In 'always_comb', use ONLY blocking assignments (=). Rule 2: In 'always_ff @(posedge clk)', use ONLY non-blocking assignments (<=). Never mix them.
+
+AssertionError: CRV FAIL
+Cause: The Constrained Random Verification (CRV) testbench detected a mismatch between the Python Golden Model and the Verilog Hardware. 
+Fix: Analyze the provided VCD Snapshot JSON. Look at the 'Inputs' and trace how the hardware routed the signals. The Verilog logic is mathematically incorrect, misaligned, or failing to handle default/garbage states properly.

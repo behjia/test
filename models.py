@@ -19,11 +19,3 @@ class HardwareSpec(BaseModel):
         ..., min_length=3, max_length=3,
         description="List exactly 3 distinct microarchitecture implementation strategies."
     )
-    
-    # NEW: The Python Golden Reference Model
-    golden_model_python: str = Field(
-        ..., 
-        description="A pure Python function named 'golden_model(inputs_dict)' that mathematically calculates the expected output. Must handle bit-masking for overflows."
-    )
-
-    test_vector_generator_python: str # <--- NEW FIELD ADDED

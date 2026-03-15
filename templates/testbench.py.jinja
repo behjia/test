@@ -1,7 +1,9 @@
 import cocotb
 from cocotb.triggers import Timer, RisingEdge, ReadOnly
-import sys
+import json
 import os
+import sys
+from pathlib import Path
 
 {% if is_sequential %}
 from cocotb.clock import Clock
@@ -19,6 +21,9 @@ from golden_model import golden_model, generate_test_vectors
 # ==============================================================================
 # COCOTB TESTBENCH
 # ==============================================================================
+# Force VCD Dumping for Verilator
+if os.environ.get("SIM", "verilator") == "verilator":
+    os.environ["COCOTB_TRACING"] = "1"
 @cocotb.test()
 async def {{ module_name }}_crv_test(dut):
     """Auto-generated Constrained Random Verification Testbench."""
@@ -79,7 +84,17 @@ async def {{ module_name }}_crv_test(dut):
         {% endfor %}
         
         # Compare Hardware vs. Golden Model
-        assert hardware_result == expected_output, \
-            f"CRV FAIL on iteration {i}: Inputs={input_dict} | Hardware Output={hardware_result} | Golden Model Expected={expected_output}"
+        try:
+            assert hardware_result == expected_output, \
+                f"CRV FAIL on iteration {i}: Inputs={input_dict} | Hardware Output={hardware_result} | Golden Model Expected={expected_output}"
+        except AssertionError as exc:
+            failure_payload = {
+                "inputs": input_dict,
+                "expected": expected_output,
+                "actual_hardware_output": hardware_result,
+            }
+            failure_path = Path("failure_context.json")
+            failure_path.write_text(json.dumps(failure_payload, indent=2), encoding="utf-8")
+            raise
                 
     dut._log.info(f"✅ CRV PASSED: 100 Custom Vectors Verified against Python Golden Model.")

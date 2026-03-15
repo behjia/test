@@ -1,0 +1,14 @@
+{
+  "module_name": "alu",
+  "is_sequential": false,
+  "inputs": [
+    {"name": "a", "width": 4},
+    {"name": "b", "width": 4},
+    {"name": "opcode", "width": 2}
+  ],
+  "outputs": [
+    {"name": "result", "width": 4}
+  ],
+  "golden_model_python": "def golden_model(state, inputs):\n    a = inputs['a']\n    b = inputs['b']\n    op = inputs['opcode']\n    if op == 0: res = (a + b) & 0xF\n    elif op == 1: res = (a - b) & 0xF\n    elif op == 2: res = a & b\n    else: res = a | b\n    return state, {'result': res}",
+  "test_vector_generator_python": "def generate_test_vectors():\n    return [{'a': 5, 'b': 3, 'opcode': 0}]" 
+}

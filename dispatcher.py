@@ -1,5 +1,6 @@
-import ray
+import json
 import os
+import ray
 import time
 import requests
 from telemetry import log_pipeline_run 
@@ -39,19 +40,20 @@ if __name__ == "__main__":
     
     print("\n================ PHASE 1: DYNAMIC GENERATION ================")
     test_request = (
-        "Design the instruction decoder for a 32-bit RISC-V processor. "
-        "It must support the following 8 instructions: add, addi, lui, lw, lbu, sw, sb, and jalr. "
-        "Output the following control signals: "
-        "1. reg_write (1 bit) "
-        "2. mem_read (1 bit), mem_write (1 bit) "
-        "3. alu_src (1 bit: 0=rs2, 1=imm) "
-        "4. mem_byte (1 bit: 1=byte, 0=word), mem_unsigned (1 bit) "
-        "5. branch/jump flags "
-        "6. alu_op (3 bits). STRICT ENCODING MUST BE USED BY BOTH PYTHON AND VERILOG: "
-        "   000=ADD/ADDI, 001=LUI, 010=JALR, 011=LOAD/STORE. "
+        "Design a complete Single-Cycle 32-bit RISC-V CPU Core (OSOC F6 minirv subset). "
+        "It must combine the PC, Register File (32 registers, x0=0), ALU, and Control Logic into one module. "
+        "Support exactly 8 instructions: add, addi, lui, lw, lbu, sw, sb, jalr with Harvard memory interfaces. "
+        "Inputs: 'clk', 'rst_n', 'instruction' [31:0] (from ROM), 'mem_read_data' [31:0] (from RAM). "
+        "Outputs: 'pc' [31:0], 'mem_addr' [31:0], 'mem_write_data' [31:0], "
+        "'mem_write_en' [3:0], 'mem_read_en' (1 bit). "
         "CRITICAL RULES: "
-        "1. If an instruction is invalid, unsupported, or has mismatched funct3/funct7 bits, ALL output control signals MUST default to 0. "
-        "2. The Python Golden Model MUST use the exact same alu_op integer values as the Verilog."
+        "1. This is SEQUENTIAL — PC and Register File update on posedge clk. "
+        "2. Register x0 MUST remain hardwired to 0. "
+        "3. The PC must reset to 0. "
+        "CRITICAL TOKEN LIMIT RULE: "
+        "Describe only the RTL skeleton (module_name, ports, parameters, is_sequential flag, and EXACTLY three dse_strategies). "
+        "Do NOT include any Python golden model or test vector code in this request. "
+        "We will generate the Python diagnostics in a second pass."
     )
     
     # 2. Get the validated Pydantic HardwareSpec
@@ -60,10 +62,16 @@ if __name__ == "__main__":
         print(f"❌ Aborting pipeline due to Pydantic spec failure:\n{spec}")
         exit(1)
 
+    spec_dict = spec.model_dump()
+    
+    oracle_code = ai_client.generate_verification_oracle(spec_dict, test_request)
+    spec_dict["golden_model_python"] = oracle_code["golden_model_and_test_generator"]
+    spec_dict["test_vector_generator_python"] = ""
+
+
     # ---> NEW: RUN THE REVIEWER AGENT <---
     spec = ai_client.review_and_fix_spec(spec)
 
-    spec_dict = spec.model_dump()
     print(f"[{spec_dict['module_name']}] Sequential Mode: {spec_dict['is_sequential']}")
     
     # 3. Generate RTL and isolate to workspaces
@@ -78,7 +86,7 @@ if __name__ == "__main__":
     module_name = spec.module_name
 
     print("\n================ PHASE 2: VERIFICATION & CRITIC RACE ================")
-    MAX_RETRIES = 1
+    MAX_RETRIES = 2
     winner = None
     final_attempts = 0 # <-- Track for telemetry
 
@@ -98,6 +106,9 @@ if __name__ == "__main__":
             print(f"{icon} {res['workspace']} | Time: {res['execution_time']:.2f}s")
             if res["status"] == "FAIL":
                 print(f"    -> Extracted Errors:")
+                tags = res.get("error_tags", [])
+                if tags:
+                    print(f"    -> Verilator tags: {', '.join(tags)}")
                 # Print the FIRST 10 lines of the focused log, which contains the real errors
                 for line in res['log'].splitlines()[:10]:
                     print(f"         {line}")
@@ -111,6 +122,11 @@ if __name__ == "__main__":
         if attempt < MAX_RETRIES - 1:
             print("\n💀 ALL DESIGNS FAILED. Initiating LLM Critic Agent loop...")
             best_failure = sorted(results, key=lambda x: x["execution_time"])[0]
+
+            failure_log = best_failure["log"]
+            if any(err in failure_log for err in ["Python Golden Model crashed", "NameError", "ValueError"]):
+                print("❌ Python Testbench Bug Detected. Aborting Critic Loop to save tokens.")
+                break
 
             # Read broken code
             design_path = os.path.join(best_failure["workspace"], "design.sv")
@@ -126,10 +142,32 @@ if __name__ == "__main__":
 
             # ---> FIX: Pass retry_count=attempt to the Critic <---
             is_seq_flag = spec_dict.get("is_sequential", False)
-            fixed_code = ai_client.fix_design(broken_code, best_failure["log"], testbench_code, is_seq_flag, retry_count=attempt)
+            error_log = best_failure["log"]
+            diag_context = best_failure.get("diagnostic_context")
+            if diag_context:
+                error_log += "\n\n=== OFFICIAL EDA DIAGNOSTICS ===\n" + diag_context
+                print("    -> Appended official diagnostics to Critic payload.")
+
+            failure_file = os.path.join(best_failure["workspace"], "failure_context.json")
+            if os.path.exists(failure_file):
+                with open(failure_file, "r", encoding="utf-8") as f:
+                    parsed = json.load(f)
+                error_log += "\n\n=== COCOTB FAILURE PAYLOAD ===\n" + json.dumps(parsed, indent=2)
+                print("    -> Appended Cocotb failure payload to Critic payload.")
+
+            fixed_code = ai_client.fix_design(
+                broken_code,
+                error_log,
+                testbench_code,
+                is_seq_flag,
+                retry_count=attempt,
+            )
 
             # Patch all workspaces for the next race
             for folder in run_folders:
+                failure_path = os.path.join(folder, "failure_context.json")
+                if os.path.exists(failure_path):
+                    os.remove(failure_path)
                 with open(os.path.join(folder, "design.sv"), "w", encoding="utf-8") as f:
                     f.write(fixed_code)
         else:

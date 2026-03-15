@@ -242,23 +242,22 @@ class EDA_LLM_Client:
         self.rag: HardwareRAG | None = rag
 
     @staticmethod
+    # ------------------------------------------------------------------
+    # Structured spec generation (now powered by Pydantic + Instructor)
+    # ------------------------------------------------------------------
+    @staticmethod
     def extract_python_code(raw_text: str) -> str:
-        """Ruthlessly extracts Python code, destroying any and all LLM Markdown."""
+        """Extract Python from markdown/code fences and strip framing keywords."""
         text = raw_text.strip()
-        # 1. Look for code inside markdown blocks
         match = re.search(r"```(?:python)?\s*(.*?)\s*```", text, re.IGNORECASE | re.DOTALL)
         if match:
             text = match.group(1)
         else:
             text = text.replace("```python", "").replace("```", "")
-        
         text = text.strip()
-        # 2. Destroy the loose word 'python' if it is sitting at the very start of the string
-        text = re.sub(r"^python\b", "", text, flags=re.IGNORECASE).strip()
+        text = re.sub(r"^python\\b", "", text, flags=re.IGNORECASE).strip()
         return text
-    # ------------------------------------------------------------------
-    # Structured spec generation (now powered by Pydantic + Instructor)
-    # ------------------------------------------------------------------
+
     def generate_spec(self, user_request: str) -> HardwareSpec | str:
         """Translate a natural-language hardware request into a validated
         ``HardwareSpec`` Pydantic model.
@@ -273,30 +272,24 @@ class EDA_LLM_Client:
         print(f"[SYSTEM] Translating request to HardwareSpec using {self.spec_model}...")
         prompt = (
             "You are a systems architect. Convert the following user request "
-            "into a strict hardware architecture specification.\n\n"
+            "into a strict hardware architecture specification that matches the "
+            "HardwareSpec schema.\n\n"
             f'User Request: "{user_request}"\n\n'
-            "Return the specification as valid JSON conforming to the schema.\n"
-            "CRITICAL RULE 1 - GOLDEN MODEL:\n"
-            "The 'golden_model_python' field MUST be a single function named 'golden_model(state, inputs)'.\n"
-            "It returns a tuple: (updated_state, expected_outputs_dict).\n"
-            "CRITICAL RULE 2 - TEST VECTOR GENERATOR:\n"
-            "The 'test_vector_generator_python' field MUST contain PURE Python code (no markdown).\n"
-            "It MUST be a single function named 'generate_test_vectors()'.\n"
-            "It MUST return a list of exactly 100 dictionaries, where each dictionary represents the 'inputs' for one clock cycle.\n"
-            "The generator MUST mix purely random noise with highly constrained, valid edge-cases (e.g., valid RISC-V opcodes, or valid AXI handshakes) to ensure 100% coverage of the internal logic.\n"
-            "Example:\n"
-            "def generate_test_vectors():\n"
-            "    import random\n"
-            "    vectors = []\n"
-            "    for i in range(100):\n"
-            "        # Mix 80% valid opcodes and 20% random garbage\n"
-            "        vectors.append({'instruction': random.choice([0x00000033, 0x00000013, random.randint(0, 0xFFFFFFFF)])})\n"
-            "    return vectors\n"
+            "Return ONLY a JSON object. Do not wrap it in markdown, prose, or code fences.\n"
+            "CRITICAL: Do NOT produce any Python golden model or test vector code. "
+            "This phase only defines the RTL skeleton.\n"
+            "The JSON must include the following fields:\n"
+            "  1. module_name (lowercase letters, numbers, underscores).\n"
+            "  2. description (a concise behavioral summary).\n"
+            "  3. is_sequential (true if clk/rst are required, false otherwise).\n"
+            "  4. parameters (list of {name, default_value}; use [] when no tunables exist).\n"
+            "  5. inputs and outputs (each list item must include 'name' and 'width').\n"
+            "  6. dse_strategies (EXACTLY three distinct strategy strings describing different design trade-offs).\n"
         )
         try:
             spec: HardwareSpec = self.instructor_client.chat.completions.create(
                 model=self.spec_model,
-                max_tokens=4096,                # Increased to 4096
+                max_tokens=8192,                # Increased to 8192
                 max_retries=2,                  # instructor auto-retries on validation failure
                 temperature=0.1,
                 messages=[
@@ -305,10 +298,6 @@ class EDA_LLM_Client:
                 ],
                 response_model=HardwareSpec,    # ← Pydantic extraction
             )
-            # SAFETY SCRUBBER: Ruthlessly extract python code and strip markdown
-            spec.golden_model_python = self.extract_python_code(spec.golden_model_python)
-            spec.test_vector_generator_python = self.extract_python_code(spec.test_vector_generator_python) # <--- NEW SCRUBBER
-
             print("✅ SUCCESS: Valid HardwareSpec generated.")
             return spec
 
@@ -322,52 +311,34 @@ class EDA_LLM_Client:
             return error_msg
     
     def review_and_fix_spec(self, spec: HardwareSpec) -> HardwareSpec:
-        """Acts as a Senior Software Engineer to verify the Python Golden Model is mathematically sound."""
-        print("[SYSTEM] Reviewer Agent analyzing Python Golden Model...")
-        
-        # Save the original code in case the Reviewer Agent hallucinates!
-        original_code = spec.golden_model_python 
-        
-        prompt = (
-            "You are a Senior Python QA Engineer. Review this proposed Golden Reference Model for a hardware testbench.\n"
-            f"Module: {spec.module_name}, Sequential: {spec.is_sequential}\n\n"
-            f"```python\n{spec.golden_model_python}\n```\n\n"
-            "CRITICAL CHECK:\n"
-            "1. The model MUST be a single function named exactly 'def golden_model(state, inputs):'. Do NOT use classes.\n"
-            "2. It must return a tuple of two dictionaries: (updated_state, outputs_dict).\n"
-            "3. It must not call any undefined helper functions.\n"
-            "If the code violates ANY of these rules, rewrite it perfectly.\n"
-            "CRITICAL: You MUST wrap your Python code inside a ```python ... ``` block. "
-            "If the code is already perfect, output it inside a ```python ... ``` block anyway. Do not output conversational text."
-        )
-        
-        try:
-            # UPGRADE: Force the Reviewer to use Claude Sonnet (TIER_ARCHITECT) for perfect Python syntax
-            fixed_code = self.moe.route_task(
-                prompt=prompt,
-                tier=ExpertTier.TIER_ARCHITECT, 
-                max_tokens=1500,
-                temperature=0.1
-            )
-            
-            cleaned_code = self.extract_python_code(fixed_code)
-            
-            try:
-                # We execute the code in a blank dictionary to ensure it doesn't crash on import
-                exec(cleaned_code, {})
-                spec.golden_model_python = cleaned_code
-                print("✅ [REVIEWER] Golden Model syntax AND runtime semantics verified.")
-            except Exception as runtime_err:
-                print(f"❌ [REVIEWER] Python Runtime Error detected in reviewed code: {type(runtime_err).__name__} - {runtime_err}")
-                print("⚠️ [REVIEWER] Reverting to original Golden Model generated in Phase 1.")
-                # FIX: Fallback to the original Sonnet code, NOT a blank dictionary!
-                spec.golden_model_python = original_code
-                
-        except Exception as e:
-            print(f"⚠️ [REVIEWER] API failed, proceeding with original spec. Error: {e}")
-            spec.golden_model_python = original_code
-        
+        """Placeholder reviewer for skeleton-first specs (no golden model included)."""
+        print("[SYSTEM] Reviewer Agent skipped (python golden model handled separately).")
         return spec
+
+    def generate_verification_oracle(self, spec_dict: dict, user_request: str) -> dict:
+        """Generate the Python golden model/test vector pair in a second pass."""
+        print("[SYSTEM] Generating verification oracle (golden model + test vectors)...")
+        prompt = (
+            "You are a Senior Python QA Engineer. You have previously defined the RTL "
+            "skeleton described below. Using that skeleton plus the original user "
+            f"request: \"{user_request}\", write TWO extremely concise Python functions: "
+            "`def golden_model(state, inputs)` and `def generate_test_vectors()`.\n"
+            "Ensure:\n"
+            "1. All undefined opcodes produce outputs with every field set to 0.\n"
+            "2. `generate_test_vectors()` returns a list of dictionaries describing sequential cycles when `is_sequential` is true or combinational inputs otherwise.\n"
+            "3. You output PURE Python code wrapped inside a single ```python ... ``` block.\n"
+            "4. Keep the code terse, avoid comments, and focus on bitwise/lookup logic.\n"
+            "Hardware Skeleton (JSON):\n"
+            f"{json.dumps(spec_dict, indent=2)}\n"
+        )
+        raw_text = self.moe.route_task(
+            prompt=prompt,
+            tier=ExpertTier.TIER_CODER,
+            max_tokens=2048,
+            temperature=0.1,
+        )
+        extracted_code = self.extract_python_code(raw_text)
+        return {"golden_model_and_test_generator": extracted_code}
 
     # ------------------------------------------------------------------
     # RTL variation generation (unchanged — free-form text output)
@@ -458,7 +429,7 @@ class EDA_LLM_Client:
                 raw_text = self.moe.route_task(
                     prompt=prompt,
                     tier=ExpertTier.TIER_CODER,
-                    max_tokens=4096,
+                    max_tokens=8192,
                     temperature=0.8,
                     system_prompt=augmented_system_prompt,  # ← RAG-injected
                 )
