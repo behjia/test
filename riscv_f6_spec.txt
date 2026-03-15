@@ -1,0 +1,11 @@
+# OSOC F6 minirv RISC-V Processor Architecture Rules
+1. HARDWARE RULE: Register R[0] (x0) is hardwired to 0. Writing to R[0] must be ignored. Reading R[0] must always return 32'b0.
+2. INSTRUCTION 'add': Opcode 0110011, funct3 000, funct7 0000000. R[rd] = R[rs1] + R[rs2].
+3. INSTRUCTION 'addi': Opcode 0010011, funct3 000. R[rd] = R[rs1] + sign_extend(imm[11:0]).
+4. INSTRUCTION 'lui': Opcode 0110111. R[rd] = {imm[31:12], 12'b0}.
+5. INSTRUCTION 'lw' (Load Word): Opcode 0000011, funct3 010. R[rd] = Memory[R[rs1] + sign_extend(imm[11:0])][31:0].
+6. INSTRUCTION 'lbu' (Load Byte Unsigned): Opcode 0000011, funct3 100. R[rd] = {24'b0, Memory[R[rs1] + sign_extend(imm[11:0])][7:0]}.
+7. INSTRUCTION 'sw' (Store Word): Opcode 0100011, funct3 010. Memory[R[rs1] + sign_extend(imm[11:0])][31:0] = R[rs2].
+8. INSTRUCTION 'sb' (Store Byte): Opcode 0100011, funct3 000. Memory[R[rs1] + sign_extend(imm[11:0])][7:0] = R[rs2][7:0].
+9. INSTRUCTION 'jalr' (Jump and Link Register): Opcode 1100111, funct3 000. R[rd] = PC + 4; PC = (R[rs1] + sign_extend(imm[11:0])) & ~1.
+10. MEMORY ALIGNMENT: The PC (Program Counter) must increment by 4 for every instruction because instructions are 32-bit (4 bytes).

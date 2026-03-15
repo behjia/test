@@ -15,11 +15,16 @@ def generate_templates(spec_dict: dict, workspace_dir: Path):
     env = Environment(loader=FileSystemLoader(str(_TEMPLATES_DIR)))
     mod_name = spec_dict.get("module_name", "design")
 
-    # ---> NEW: ISOLATE THE PYTHON GOLDEN MODEL <---
-    # Write the AI's python code to a completely separate file to avoid Jinja indentation corruption
+    # ---> NEW: ISOLATE THE PYTHON GOLDEN MODEL AND TEST GENERATOR <---
+    # Extract both python functions from the Pydantic spec
     golden_code = spec_dict.get("golden_model_python", "def golden_model(state, inputs):\n    return state, {}")
+    test_gen_code = spec_dict.get("test_vector_generator_python", "def generate_test_vectors():\n    return []")
+    
+    # Combine them into a single Python file so the testbench can import both
+    combined_python = f"{golden_code}\n\n{test_gen_code}"
+    
     golden_path = workspace_dir / "golden_model.py"
-    golden_path.write_text(golden_code, encoding="utf-8")
+    golden_path.write_text(combined_python, encoding="utf-8")
 
     # 1. RENDER TESTBENCH
     tb_template = env.get_template("testbench.py.jinja")
@@ -56,7 +61,7 @@ def generate_templates(spec_dict: dict, workspace_dir: Path):
         )
         c_path = workspace_dir / f"{mod_name}_driver.h"
         c_path.write_text(c_rendered, encoding="utf-8")
-
+    
     return out_path
 
 def run_verification(workspace_dir: str, fallback_module_name: str,

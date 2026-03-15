@@ -11,6 +11,7 @@ import instructor
 from dotenv import load_dotenv
 from pydantic import ValidationError
 from models import HardwareSpec
+from rag_agent import HardwareRAG
 
 # Silence litellm's verbose success messages; keep warnings/errors
 litellm.success_callback = []
@@ -38,8 +39,10 @@ class ExpertTier(Enum):
                      (Opus is the ceiling).
     """
     TIER_GRUNT     = ("gemini/gemini-3.1-flash-lite-preview",    "claude-haiku-4-5-20251001")
-    TIER_CODER     = ("gemini/gemini-3.1-pro-preview", "claude-sonnet-4-5-20250929")
+    TIER_CODER     = ("claude-sonnet-4-5-20250929", "gemini/gemini-3.1-pro-preview")
     TIER_ARCHITECT = ("claude-sonnet-4-5-20250929",        None)   # No fallback
+    # Preferred LiteLLM-native NVIDIA route:
+    TIER_HARDWARE_ORACLE = ("nvidia_nim/meta/llama-3.1-70b-instruct", None)
 
     @property
     def primary(self) -> str:
@@ -66,6 +69,27 @@ class MoE_Client:
 
     def __init__(self, default_system_prompt: str = ""):
         self.default_system_prompt = default_system_prompt
+        self.nvidia_api_key = os.getenv("NVIDIA_API_KEY")
+        self.nvidia_api_base = os.getenv("NVIDIA_API_BASE", "https://integrate.api.nvidia.com/v1")
+
+    def _provider_kwargs(self, model_name: str | None) -> dict:
+        if not model_name:
+            return {}
+
+        is_nvidia = (
+            model_name.startswith("nvidia_nim/")
+            or model_name == "openai/nvidia/llama-3.1-70b-instruct"
+        )
+        if not is_nvidia:
+            return {}
+
+        if not self.nvidia_api_key:
+            raise ValueError("NVIDIA_API_KEY is required for NVIDIA NIM routing.")
+
+        return {
+            "api_base": self.nvidia_api_base,
+            "api_key": self.nvidia_api_key,
+        }
 
     # ------------------------------------------------------------------
     # Core routing primitive
@@ -121,6 +145,7 @@ class MoE_Client:
                 messages=messages,
                 max_tokens=max_tokens,
                 temperature=temperature,
+                **self._provider_kwargs(tier.primary),
             )
             return response.choices[0].message.content
 
@@ -141,6 +166,7 @@ class MoE_Client:
                 messages=messages,
                 max_tokens=max_tokens,
                 temperature=temperature,
+                **self._provider_kwargs(tier.fallback),
             )
             return response.choices[0].message.content
 
@@ -172,12 +198,20 @@ class MoE_Client:
 # ==========================================================================
 
 class EDA_LLM_Client:
-    def __init__(self):
+    def __init__(self, rag: HardwareRAG | None = None):
         """Initialise the EDA client.
 
         API keys are read from environment variables (via .env):
         - ANTHROPIC_API_KEY  — required for Claude models
         - GEMINI_API_KEY     — required for Gemini models (or use GOOGLE_API_KEY)
+
+        Parameters
+        ----------
+        rag:
+            Optional :class:`~rag_agent.HardwareRAG` instance.  When provided,
+            ``generate_variations`` will retrieve relevant spec rules from the
+            vector DB and inject them into the system prompt before every
+            RTL generation call.  Pass ``None`` (default) to run without RAG.
         """
         # Validate that at least Anthropic key is present (Gemini is optional
         # but strongly recommended for the fallback / TIER_GRUNT primary).
@@ -203,23 +237,10 @@ class EDA_LLM_Client:
 
         # Explicitly use Claude for Pydantic/Instructor tasks to avoid Gemini tool-call bugs
         self.spec_model = "claude-sonnet-4-5-20250929"
-    # # ------------------------------------------------------------------
-    # # Connection smoke-test
-    # # ------------------------------------------------------------------
-    # def test_connection(self):
-    #     print(f"[SYSTEM] Sending test prompt via MoE (TIER_GRUNT)...")
-    #     try:
-    #         return self.moe.route_task(
-    #             prompt=(
-    #                 "Write a tiny 1-bit Verilog half-adder module. "
-    #                 "Output nothing but the raw Verilog code."
-    #             ),
-    #             tier=ExpertTier.TIER_GRUNT,
-    #             max_tokens=256,
-    #             temperature=0.1,
-    #         )
-    #     except Exception as e:
-    #         return f"❌ ERROR: An unexpected error occurred: {e}"
+
+        # Optional RAG agent — set to None to disable context retrieval
+        self.rag: HardwareRAG | None = rag
+
     @staticmethod
     def extract_python_code(raw_text: str) -> str:
         """Ruthlessly extracts Python code, destroying any and all LLM Markdown."""
@@ -255,26 +276,27 @@ class EDA_LLM_Client:
             "into a strict hardware architecture specification.\n\n"
             f'User Request: "{user_request}"\n\n'
             "Return the specification as valid JSON conforming to the schema.\n"
-            "CRITICAL RULE FOR THE GOLDEN MODEL:\n"
-            "The 'golden_model_python' field must contain PURE Python code (no markdown).\n"
-            "It MUST be a single function named 'golden_model(state, inputs)'.\n"
-            " - 'state' is a dictionary holding memory (e.g., {'queue': []}).\n"
-            " - 'inputs' is a dictionary of the current clock cycle's input pins.\n"
-            "The function MUST return a tuple: (updated_state, expected_outputs_dict).\n"
+            "CRITICAL RULE 1 - GOLDEN MODEL:\n"
+            "The 'golden_model_python' field MUST be a single function named 'golden_model(state, inputs)'.\n"
+            "It returns a tuple: (updated_state, expected_outputs_dict).\n"
+            "CRITICAL RULE 2 - TEST VECTOR GENERATOR:\n"
+            "The 'test_vector_generator_python' field MUST contain PURE Python code (no markdown).\n"
+            "It MUST be a single function named 'generate_test_vectors()'.\n"
+            "It MUST return a list of exactly 100 dictionaries, where each dictionary represents the 'inputs' for one clock cycle.\n"
+            "The generator MUST mix purely random noise with highly constrained, valid edge-cases (e.g., valid RISC-V opcodes, or valid AXI handshakes) to ensure 100% coverage of the internal logic.\n"
             "Example:\n"
-            "def golden_model(state, inputs):\n"
-            "    queue = state.get('queue', [])\n"
-            "    if not inputs.get('rst_n', 1):\n"
-            "        queue = []\n"
-            "    elif inputs.get('write_en', 0):\n"
-            "        queue.append(inputs['data_in'])\n"
-            "    out_val = queue.pop(0) if inputs.get('read_en', 0) and queue else 0\n"
-            "    return ({'queue': queue}, {'data_out': out_val, 'full': len(queue)>=16, 'empty': len(queue)==0})"
+            "def generate_test_vectors():\n"
+            "    import random\n"
+            "    vectors = []\n"
+            "    for i in range(100):\n"
+            "        # Mix 80% valid opcodes and 20% random garbage\n"
+            "        vectors.append({'instruction': random.choice([0x00000033, 0x00000013, random.randint(0, 0xFFFFFFFF)])})\n"
+            "    return vectors\n"
         )
         try:
             spec: HardwareSpec = self.instructor_client.chat.completions.create(
                 model=self.spec_model,
-                max_tokens=1500,                # Increased to handle complex FIFO Golden Models
+                max_tokens=4096,                # Increased to 4096
                 max_retries=2,                  # instructor auto-retries on validation failure
                 temperature=0.1,
                 messages=[
@@ -285,7 +307,8 @@ class EDA_LLM_Client:
             )
             # SAFETY SCRUBBER: Ruthlessly extract python code and strip markdown
             spec.golden_model_python = self.extract_python_code(spec.golden_model_python)
-            
+            spec.test_vector_generator_python = self.extract_python_code(spec.test_vector_generator_python) # <--- NEW SCRUBBER
+
             print("✅ SUCCESS: Valid HardwareSpec generated.")
             return spec
 
@@ -351,9 +374,12 @@ class EDA_LLM_Client:
     # ------------------------------------------------------------------
     def generate_variations(self, spec: HardwareSpec | dict, num_variations: int = 3):
         spec_dict = spec.model_dump() if isinstance(spec, HardwareSpec) else spec
-        print(f"\n[SYSTEM] Generating {num_variations} RTL variations using MoE Router (TIER_GRUNT)...")
+        print(
+            f"\n[SYSTEM] Generating {num_variations} RTL variations using "
+            f"Claude Sonnet (TIER_CODER)..."
+        )
         variations = []
-        
+
         # 1. Check if the Planner Agent decided this needs a clock
         is_seq = spec_dict.get("is_sequential", False)
         if is_seq:
@@ -378,6 +404,40 @@ class EDA_LLM_Client:
             "Write standard behavioral RTL.", "Focus on area.", "Focus on speed."
         ])
 
+        # ------------------------------------------------------------------
+        # 3. RAG CONTEXT RETRIEVAL
+        # Build a semantic query from the spec so the vector DB can return
+        # the most relevant opcode tables, bus rules, or timing constraints.
+        # This block runs once per generate_variations() call, not per variation,
+        # because all variations share the same architectural requirements.
+        # ------------------------------------------------------------------
+        rag_context_block = ""
+        if self.rag is not None:
+            rag_query = (
+                f"{spec_dict.get('module_name', '')} "
+                f"{spec_dict.get('description', '')} "
+                f"{'sequential' if is_seq else 'combinational'}"
+            ).strip()
+            print(f"  [RAG] Querying vector DB with: '{rag_query[:80]}...'")
+            retrieved = self.rag.retrieve_context(rag_query, n_results=3)
+            if retrieved:
+                rag_context_block = (
+                    "\n\n=== RETRIEVED HARDWARE SPECIFICATIONS ===\n"
+                    "The following rules are AUTHORITATIVE. They are extracted from\n"
+                    "verified hardware specification documents. You MUST follow them\n"
+                    "exactly. Do NOT invent opcodes, signal names, or bus rules.\n\n"
+                    f"{retrieved}\n"
+                    "=== END OF RETRIEVED SPECIFICATIONS ==="
+                )
+                print(f"  [RAG] ✅ Context injected ({len(rag_context_block)} chars).")
+            else:
+                print("  [RAG] ⚠️  No relevant rules found in DB. Proceeding without RAG context.")
+
+        # Build the RAG-augmented system prompt once and reuse it for all
+        # variations in this call.  When rag_context_block is empty (RAG
+        # disabled or no results) this degrades gracefully to the base prompt.
+        augmented_system_prompt = self.system_prompt + rag_context_block
+
         for i in range(num_variations):
             seed = strategies[i] if i < len(strategies) else strategies[0]
             print(f"  -> Generating Variation {i + 1} (Strategy: {seed[:40]}...)")
@@ -395,26 +455,25 @@ class EDA_LLM_Client:
             5. Output ONLY the raw SystemVerilog code. Do not explain anything.
             """
             try:
-                # Variations are boilerplate-heavy → use cheap TIER_GRUNT by default.
-                # Falls back to Haiku automatically if Flash is rate-limited.
                 raw_text = self.moe.route_task(
                     prompt=prompt,
-                    tier=ExpertTier.TIER_GRUNT,
-                    max_tokens=1024,
+                    tier=ExpertTier.TIER_CODER,
+                    max_tokens=4096,
                     temperature=0.8,
+                    system_prompt=augmented_system_prompt,  # ← RAG-injected
                 )
                 match = re.search(r"```(?:verilog|systemverilog)?(.*?)```", raw_text, re.DOTALL | re.IGNORECASE)
                 clean_verilog = match.group(1).strip() if match else raw_text.strip()
-                
+
                 # SAFETY SCRUBBER: Remove hallucinated backtick macros before saving
                 clean_verilog = clean_verilog.replace("`systemverilog\n", "")
                 clean_verilog = clean_verilog.replace("`verilog\n", "")
-                clean_verilog = clean_verilog.replace("`systemverilog", "") # Catch it without the newline just in case
-                
+                clean_verilog = clean_verilog.replace("`systemverilog", "")  # Catch it without the newline just in case
+
                 variations.append(clean_verilog)
             except Exception as e:
                 print(f"❌ ERROR on variation {i}: {e}")
-                variations.append(f"// Generation Failed: {e}")
+                variations.append("module sync_fifo_16x32(); endmodule")
         return variations
     
     # ------------------------------------------------------------------
@@ -437,9 +496,8 @@ class EDA_LLM_Client:
         MoE router so that costs stay minimal on the first attempt while
         progressively heavier models are engaged for stubborn failures:
 
-        retry_count == 0  →  TIER_GRUNT     (Gemini Flash / Haiku fallback)
-        retry_count == 1  →  TIER_CODER     (Claude Sonnet / Gemini Pro fallback)
-        retry_count >= 2  →  TIER_ARCHITECT (Claude Opus — no fallback)
+        retry_count == 0  →  TIER_CODER     (Claude Sonnet)
+        retry_count >= 1  →  TIER_ARCHITECT (Claude Opus — no fallback)
 
         Parameters
         ----------
@@ -454,7 +512,10 @@ class EDA_LLM_Client:
         retry_count:
             Number of previous failed fix attempts — controls tier escalation.
         """
-        tier = MoE_Client.tier_for_retry(retry_count)
+        if retry_count == 0:
+            tier = ExpertTier.TIER_CODER
+        else:
+            tier = ExpertTier.TIER_ARCHITECT
         print(
             f"[SYSTEM] Attempting auto-fix "
             f"(retry #{retry_count} → {tier.name}, primary: {tier.primary})..."

@@ -1,51 +1,122 @@
-module sync_fifo_16x32 (
-    input logic clk,
-    input logic rst_n,
-    input logic write_en,
-    input logic read_en,
-    input logic [31:0] data_in,
-    output logic [31:0] data_out,
-    output logic full,
-    output logic empty
+module riscv_instruction_decoder (
+    input  logic [31:0] instruction,
+    output logic        reg_write,
+    output logic        mem_read,
+    output logic        mem_write,
+    output logic        alu_src,
+    output logic        mem_byte,
+    output logic        mem_unsigned,
+    output logic        is_branch,
+    output logic        is_jump,
+    output logic [2:0]  alu_op
 );
 
-    logic [3:0] wr_ptr;
-    logic [3:0] rd_ptr;
-    logic [4:0] count;
-    logic [31:0] mem [15:0];
-    logic read_en_q;
+    `ifndef SYNTHESIS
+    initial begin #1; end
+    `endif
 
-    assign full = (count == 5'd16);
-    assign empty = (count == 5'd0);
+    logic [6:0] opcode;
+    logic [2:0] funct3;
+    logic [6:0] funct7;
 
-    always_ff @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            wr_ptr <= 4'd0;
-            rd_ptr <= 4'd0;
-            count <= 5'd0;
-            read_en_q <= 1'b0;
-            data_out <= 32'd0;
-        end else begin
-            read_en_q <= read_en;
+    always_comb begin
+        // Extract instruction fields
+        opcode = instruction[6:0];
+        funct3 = instruction[14:12];
+        funct7 = instruction[31:25];
 
-            if (write_en && !full) begin
-                mem[wr_ptr] <= data_in;
-                wr_ptr <= wr_ptr + 4'd1;
+        // Default all outputs to 0
+        reg_write    = 1'b0;
+        mem_read     = 1'b0;
+        mem_write    = 1'b0;
+        alu_src      = 1'b0;
+        mem_byte     = 1'b0;
+        mem_unsigned = 1'b0;
+        is_branch    = 1'b0;
+        is_jump      = 1'b0;
+        alu_op       = 3'b000;
+
+        // Decode instructions
+        case (opcode)
+            7'b0110011: begin // R-type
+                if (funct3 == 3'b000 && funct7 == 7'b0000000) begin
+                    // add instruction
+                    reg_write = 1'b1;
+                    alu_src   = 1'b0;
+                    alu_op    = 3'b000;
+                end
             end
 
-            if (read_en_q && !empty) begin
-                data_out <= mem[rd_ptr];
-                rd_ptr <= rd_ptr + 4'd1;
-            end else begin
-                data_out <= 32'd0;
+            7'b0010011: begin // I-type arithmetic
+                if (funct3 == 3'b000) begin
+                    // addi instruction
+                    reg_write = 1'b1;
+                    alu_src   = 1'b1;
+                    alu_op    = 3'b000;
+                end
             end
 
-            if ((write_en && !full) && !(read_en_q && !empty)) begin
-                count <= count + 5'd1;
-            end else if (!(write_en && !full) && (read_en_q && !empty)) begin
-                count <= count - 5'd1;
+            7'b0110111: begin // U-type
+                // lui instruction
+                reg_write = 1'b1;
+                alu_src   = 1'b1;
+                alu_op    = 3'b001;
             end
-        end
+
+            7'b0000011: begin // I-type load
+                if (funct3 == 3'b010) begin
+                    // lw instruction
+                    reg_write    = 1'b1;
+                    mem_read     = 1'b1;
+                    alu_src      = 1'b1;
+                    mem_byte     = 1'b0;
+                    mem_unsigned = 1'b0;
+                    alu_op       = 3'b011;
+                end
+                else if (funct3 == 3'b100) begin
+                    // lbu instruction
+                    reg_write    = 1'b1;
+                    mem_read     = 1'b1;
+                    alu_src      = 1'b1;
+                    mem_byte     = 1'b1;
+                    mem_unsigned = 1'b1;
+                    alu_op       = 3'b011;
+                end
+            end
+
+            7'b0100011: begin // S-type store
+                if (funct3 == 3'b010) begin
+                    // sw instruction
+                    mem_write    = 1'b1;
+                    alu_src      = 1'b1;
+                    mem_byte     = 1'b0;
+                    mem_unsigned = 1'b0;
+                    alu_op       = 3'b011;
+                end
+                else if (funct3 == 3'b000) begin
+                    // sb instruction
+                    mem_write    = 1'b1;
+                    alu_src      = 1'b1;
+                    mem_byte     = 1'b1;
+                    mem_unsigned = 1'b0;
+                    alu_op       = 3'b011;
+                end
+            end
+
+            7'b1100111: begin // I-type jalr
+                if (funct3 == 3'b000) begin
+                    // jalr instruction
+                    reg_write = 1'b1;
+                    alu_src   = 1'b1;
+                    is_jump   = 1'b1;
+                    alu_op    = 3'b010;
+                end
+            end
+
+            default: begin
+                // Invalid instruction - all outputs remain 0
+            end
+        endcase
     end
 
 endmodule

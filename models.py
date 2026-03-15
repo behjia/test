@@ -11,19 +11,19 @@ class ParameterSpec(BaseModel):
 class HardwareSpec(BaseModel):
     module_name: str = Field(..., pattern=r"^[a-z][a-z0-9_]*$")
     description: str = Field(..., description="Brief behavioral description")
-    
+    is_sequential: bool = Field(..., description="True if requires clk/rst_n. False if combinational.")
+    parameters: list[ParameterSpec] = Field(default_factory=list)
+    inputs: list[PortSpec] = Field(..., min_length=1)
+    outputs: list[PortSpec] = Field(..., min_length=1)
     dse_strategies: list[str] = Field(
         ..., min_length=3, max_length=3,
         description="List exactly 3 distinct microarchitecture implementation strategies."
     )
-    is_sequential: bool = Field(..., description="True if requires clk/rst_n. False if combinational.")
     
     # NEW: The Python Golden Reference Model
     golden_model_python: str = Field(
         ..., 
         description="A pure Python function named 'golden_model(inputs_dict)' that mathematically calculates the expected output. Must handle bit-masking for overflows."
     )
-    
-    parameters: list[ParameterSpec] = Field(default_factory=list)
-    inputs: list[PortSpec] = Field(..., min_length=1)
-    outputs: list[PortSpec] = Field(..., min_length=1)
+
+    test_vector_generator_python: str # <--- NEW FIELD ADDED

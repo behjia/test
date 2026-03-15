@@ -41,7 +41,7 @@ def run_openlane(workspace_dir: str, module_name: str, gate_count: int = 100) ->
         "CLOCK_NET": None,
         "RUN_CTS": False,   
         "DIODE_INSERTION_STRATEGY": 4,
-        "RUN_LINTER": False # <-- ADD THIS: Bypass internal linter, trust our Python pipeline
+        "RUN_LINTER": True
     }
     # If the design is tiny (like an ALU or Adder), force a massive 50x50 area
     # to guarantee the PDN router has enough room to draw power lines.

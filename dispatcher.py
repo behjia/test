@@ -4,6 +4,7 @@ import time
 import requests
 from telemetry import log_pipeline_run 
 from verifier import run_verification
+from rag_agent import HardwareRAG
 from llm_client import EDA_LLM_Client, setup_workspaces
 from models import HardwareSpec
 
@@ -18,9 +19,11 @@ os.environ["RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO"] = "0"
 def initialize_dispatcher():
     num_cores = os.cpu_count()
     if not ray.is_initialized():
-        ray.init(num_cpus=num_cores, log_to_driver=False)
-    print(f"[SYSTEM] Ray cluster active. Cores available: {num_cores}\n")
-    return num_cores
+        #ray.init(num_cpus=num_cores, log_to_driver=False)
+        # FORCE 1 CPU: Prevents Verilator g++ from running out of RAM
+        ray.init(num_cpus=1, log_to_driver=False) 
+    print(f"[SYSTEM] Ray cluster active. Cores available: {num_cores}. Throttled to 1 Core to prevent OOM.\n")
+    return 1
 
 @ray.remote(num_cpus=1)
 def verify_design_worker(workspace_dir: str, fallback_module_name: str, spec_dict: dict):
@@ -29,16 +32,26 @@ def verify_design_worker(workspace_dir: str, fallback_module_name: str, spec_dic
 if __name__ == "__main__":
     global_start_time = time.time() # <-- ADD START TIMER
     cores = initialize_dispatcher()
-    ai_client = EDA_LLM_Client()
+    
+    # 1. Initialize RAG and pass it to the client
+    rag_db = HardwareRAG()
+    ai_client = EDA_LLM_Client(rag=rag_db)
     
     print("\n================ PHASE 1: DYNAMIC GENERATION ================")
-    # 1. Ask for a sequential memory unit
-    # The Real Target: 1-bit MAC
     test_request = (
-        "Design a 16-word by 32-bit synchronous FIFO buffer. "
-        "It must include clk, rst_n, write_en, read_en, data_in [31:0], data_out [31:0], full, and empty flags. "
-        "CRITICAL ARCHITECTURE RULE: This is a Standard FIFO, NOT a First-Word Fall-Through (FWFT) FIFO. "
-        "The 'data_out' port must output 0 if 'read_en' is 0. Data should only appear on 'data_out' on the clock cycle AFTER 'read_en' is asserted."
+        "Design the instruction decoder for a 32-bit RISC-V processor. "
+        "It must support the following 8 instructions: add, addi, lui, lw, lbu, sw, sb, and jalr. "
+        "Output the following control signals: "
+        "1. reg_write (1 bit) "
+        "2. mem_read (1 bit), mem_write (1 bit) "
+        "3. alu_src (1 bit: 0=rs2, 1=imm) "
+        "4. mem_byte (1 bit: 1=byte, 0=word), mem_unsigned (1 bit) "
+        "5. branch/jump flags "
+        "6. alu_op (3 bits). STRICT ENCODING MUST BE USED BY BOTH PYTHON AND VERILOG: "
+        "   000=ADD/ADDI, 001=LUI, 010=JALR, 011=LOAD/STORE. "
+        "CRITICAL RULES: "
+        "1. If an instruction is invalid, unsupported, or has mismatched funct3/funct7 bits, ALL output control signals MUST default to 0. "
+        "2. The Python Golden Model MUST use the exact same alu_op integer values as the Verilog."
     )
     
     # 2. Get the validated Pydantic HardwareSpec
@@ -65,7 +78,7 @@ if __name__ == "__main__":
     module_name = spec.module_name
 
     print("\n================ PHASE 2: VERIFICATION & CRITIC RACE ================")
-    MAX_RETRIES = 4
+    MAX_RETRIES = 1
     winner = None
     final_attempts = 0 # <-- Track for telemetry
 
@@ -148,10 +161,10 @@ if __name__ == "__main__":
             print("✅ SYNTHESIS SUCCESS!")
             print(f"📊 HARDWARE COST (AREA): {synth_metrics['gate_count']} Logic Gates")
             print(f"⏱️  SYNTHESIS TIME: {synth_metrics['execution_time']:.2f} seconds")
-            
-            print(f"\n[PHYSICAL DESIGN] Triggering OpenLane RTL-to-GDSII flow for {winner['module_name']}...")
-            openlane_metrics = run_openlane(winner['workspace'], winner["module_name"], synth_metrics['gate_count'])
-            print(openlane_metrics)
+            # Commented out for testing
+            # print(f"\n[PHYSICAL DESIGN] Triggering OpenLane RTL-to-GDSII flow for {winner['module_name']}...")
+            # openlane_metrics = run_openlane(winner['workspace'], winner["module_name"], synth_metrics['gate_count'])
+            # print(openlane_metrics)
 
             # # ---------------------------------------------------------- #
             # # PHASE 4: PHYSICAL FPGA DEPLOYMENT (REMOTE API)             #
