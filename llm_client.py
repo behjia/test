@@ -11,7 +11,8 @@ import instructor
 from dotenv import load_dotenv
 from pydantic import ValidationError
 from models import ArchitecturePlan, HardwareSpec
-from rag_agent import HardwareRAG
+from rag_agent import HybridRAG, HardwareRAG
+from ip_manager import IPManager
 
 # Silence litellm's verbose success messages; keep warnings/errors
 litellm.success_callback = []
@@ -39,7 +40,7 @@ class ExpertTier(Enum):
                      where cheaper models have already failed. No fallback
                      (Opus is the ceiling).
     """
-    TIER_GRUNT     = ("gemini/gemini-3.1-pro-preview",    "claude-haiku-4-5-20251001")
+    TIER_GRUNT     = ("claude-haiku-4-5-20251001",  "gemini/gemini-3.1-pro-preview")
     TIER_CODER     = ("claude-sonnet-4-5-20250929", "gemini/gemini-3.1-pro-preview")
     TIER_ARCHITECT = ("claude-sonnet-4-5-20250929",        None)   # No fallback
     # Preferred LiteLLM-native NVIDIA route:
@@ -219,7 +220,7 @@ class MoE_Client:
 # ==========================================================================
 
 class EDA_LLM_Client:
-    def __init__(self, rag: HardwareRAG | None = None):
+    def __init__(self, rag: HybridRAG | None = None):
         """Initialise the EDA client.
 
         API keys are read from environment variables (via .env):
@@ -229,10 +230,10 @@ class EDA_LLM_Client:
         Parameters
         ----------
         rag:
-            Optional :class:`~rag_agent.HardwareRAG` instance.  When provided,
-            ``generate_rtl`` will retrieve relevant spec rules from the
-            vector DB and inject them into the system prompt before every
-            RTL generation call.  Pass ``None`` (default) to run without RAG.
+            Optional :class:`~rag_agent.HybridRAG` instance. When provided, the
+            client will use the hybrid vector+graph retrieval pipeline. Pass
+            ``None`` to auto-instantiate a default HybridRAG backed by the
+            ``hardware_specs`` collection.
         """
         # Validate that at least Anthropic key is present (Gemini is optional
         # but strongly recommended for the fallback / TIER_GRUNT primary).
@@ -259,8 +260,8 @@ class EDA_LLM_Client:
         # Explicitly use Claude for Pydantic/Instructor tasks to avoid Gemini tool-call bugs
         self.spec_model = ExpertTier.TIER_GRUNT.primary
 
-        # Optional RAG agent — set to None to disable context retrieval
-        self.rag: HardwareRAG | None = rag
+        # Hybrid RAG manager — vector + graph retrieval for specs and logic
+        self.rag: HybridRAG | None = rag or HybridRAG(vector_collections=["hardware_specs"])
 
     def _render_ip_library_headers(self) -> str:
         ip_dir = Path("ip_library")
@@ -319,6 +320,20 @@ class EDA_LLM_Client:
         print("  [RAG] ⚠️  No relevant rules found in DB.")
         return ""
 
+    def _retrieve_hybrid_context(self, query: str) -> str:
+        if self.rag is None:
+            return ""
+        try:
+            retrieved = self.rag.retrieve_hybrid_context(query)
+        except Exception as exc:
+            print(f"  [RAG] ⚠️  Hybrid retrieval failed: {exc}")
+            return ""
+        if retrieved:
+            print(f"  [RAG] ✅ Hybrid context cached ({len(retrieved)} chars).")
+            return retrieved
+        print("  [RAG] ⚠️  Hybrid context returned empty.")
+        return ""
+
     def _build_system_context(self, spec_dict: dict, rag_text: str, ip_context: str) -> str:
         sections = [
             "=== SYSTEM CONTEXT ===",
@@ -329,6 +344,36 @@ class EDA_LLM_Client:
         if ip_context:
             sections.append("IP Library Interfaces:\n" + ip_context)
         return "\n\n".join(sections)
+
+    def _retrieve_testbench_example(self, module_name: str | None, component_class: str | None) -> str:
+        if not self.rag or not self.rag.has_collection("testbench_examples"):
+            return ""
+        key_parts = filter(None, [module_name, component_class])
+        query = " ".join(key_parts).strip()
+        if not query:
+            return ""
+        try:
+            return self.rag.retrieve_context(
+                query, n_results=1, collection_name="testbench_examples"
+            )
+        except Exception as exc:
+            print(f"[RAG] ⚠️  Testbench example retrieval failed: {exc}")
+            return ""
+
+    @staticmethod
+    def _normalize_function_body(body: str, fallback: str) -> str:
+        cleaned = body.strip()
+        if not cleaned:
+            cleaned = fallback.strip()
+        normalized_lines = []
+        for line in cleaned.splitlines():
+            if not line.strip():
+                normalized_lines.append("")
+                continue
+            normalized_lines.append(
+                line if line.startswith("    ") else f"    {line}"
+            )
+        return "\n".join(normalized_lines)
 
     @staticmethod
     # ------------------------------------------------------------------
@@ -379,7 +424,7 @@ class EDA_LLM_Client:
             spec: HardwareSpec = self.instructor_client.chat.completions.create(
             model=ExpertTier.TIER_GRUNT.primary,
             max_tokens=8192,
-            max_retries=2,
+            max_retries=1,
             temperature=0.1,
             messages=[
                 {"role": "system", "content": self.system_prompt},
@@ -400,7 +445,9 @@ class EDA_LLM_Client:
             print(error_msg)
             return error_msg
 
-    def decompose_architecture(self, user_request: str) -> ArchitecturePlan | str:
+    def decompose_architecture(
+        self, user_request: str, force_submodules: bool = False
+    ) -> ArchitecturePlan | str:
         """Break complex CPU requests into a bottom-up task list."""
         print(f"[SYSTEM] Decomposing architecture for request: {user_request[:80]}...")
         ip_library_dir = "ip_library"
@@ -427,12 +474,28 @@ class EDA_LLM_Client:
         else:
             available_ips = []
             ip_catalog_text = ""
+        ip_mgr = IPManager()
+        catalog_text = ip_mgr.get_semantic_catalog()
+        hybrid_context = self._retrieve_hybrid_context(user_request)
+        hybrid_section = (
+            f"\n\nHYBRID CONTEXT:\n{hybrid_context}\n" if hybrid_context else ""
+        )
+        forced_rule = ""
+        if force_submodules:
+            forced_rule = (
+                "CRITICAL FORCED DECOMPOSITION: The user has explicitly commanded you to break this component down "
+                "because it is too complex for a single module. You MUST set is_complex = True and return AT LEAST 2 "
+                "smaller sub-module tasks (e.g., MainDecoder, ALUDecoder) and 1 TOP_LEVEL integration task. You are "
+                "FORBIDDEN from returning a single task.\n"
+            )
+
         prompt = (
             "You are a Lead CPU Architect mapping user needs to a modular implementation plan.\n"
             f"User Request: \"{user_request}\"\n"
             f"AVAILABLE IP INVENTORY: {available_ips}.\n"
-            "AVAILABLE SEMANTIC IP CATALOG:\n"
-            f"{ip_catalog_text}\n"
+            "AVAILABLE IP INVENTORY (With Hardware Cost Metrics):\n"
+            f"{catalog_text}\n"
+            f"{hybrid_section}"
             "Return a JSON object conforming EXACTLY to the ArchitecturePlan schema.\n"
             "Rules:\n"
             "1. is_complex must be true when multiple modules are required (e.g., full CPU). "
@@ -442,8 +505,9 @@ class EDA_LLM_Client:
             "4. For any task that represents a top-level integration (e.g., the overall CPU), set requires_dummy_oracle to true so the verification oracle falls back to a pass-through model.\n"
             "5. Keep prompts detailed enough for a HardwareSpec generator to implement the requested block.\n"
             "6. INTELLIGENT REUSE: Compare your required sub-modules against the AVAILABLE IP INVENTORY. "
-            "Read the descriptions in the AVAILABLE SEMANTIC IP CATALOG. If an existing IP's description semantically fulfills a sub-module you need, you MUST reuse its exact module_name instead of inventing a new task. Do not duplicate existing functionality.\n"
+            "Read the descriptions in the AVAILABLE IP INVENTORY (With Hardware Cost Metrics). If multiple IPs fulfill your requirement, you MUST evaluate their Hardware Cost (gate count) and select the module_name that best fits the user's implicit optimization goal (e.g., choose the smaller gate count for area-optimized requests). Do not duplicate existing functionality.\n"
             "CRITICAL ARCHITECTURE RULES:\n"
+            f"{forced_rule}"
             " - DO NOT create tasks to generate RAM, ROM, Instruction Memory, Data Memory, or Caches. The top-level CPU core must instead expose standard memory interface ports (imem_addr, imem_rdata, dmem_addr, dmem_wdata, dmem_we) to communicate with external memory.\n"
             " - Limit your decomposition strictly to the core processing elements (ProgramCounter, ALU, RegisterFile, ImmGen, ControlUnit, and the top-level integration).\n"
         )
@@ -475,9 +539,31 @@ class EDA_LLM_Client:
         print("[SYSTEM] Reviewer Agent skipped (python golden model handled separately).")
         return spec
 
-    def generate_verification_oracle(self, spec_dict: dict, user_request: str) -> dict:
+    def generate_verification_oracle(
+        self,
+        spec_dict: dict,
+        user_request: str,
+        module_name: str | None = None,
+        component_class: str | None = None,
+    ) -> dict:
         """Generate the Python golden model/test vector pair in a second pass."""
         print("[SYSTEM] Generating verification oracle (golden model + test vectors)...")
+        example_block = ""
+        example_text = self._retrieve_testbench_example(module_name, component_class)
+        if example_text:
+            example_block = (
+                "\n\nCRITICAL EXAMPLE: Here is a verified, perfect Python Oracle for a similar module. "
+                "You MUST mimic this exact structure and logic flow:\n"
+                f"{example_text}\n"
+            )
+
+        hybrid_context = self._retrieve_hybrid_context(user_request)
+        hybrid_section = (
+            f"\n\nHYBRID CONTEXT:\n{hybrid_context}\n"
+            if hybrid_context
+            else ""
+        )
+
         base_prompt = (
             "You are a Senior Python QA Engineer. You have previously defined the RTL "
             "skeleton described below. Using that skeleton plus the original user "
@@ -506,6 +592,11 @@ class EDA_LLM_Client:
             "You MUST use exactly those function names, and you MUST return `test_vectors` and `model_state, expected_output`.\n"
             "9. CRITICAL RULE: The `generate_test_vectors()` function MUST return a valid Python list of dictionaries. It absolutely CANNOT return None.\n"
             "10. Include a fallback `return []` at the end so a list is always produced even if your logic fails.\n"
+            "IMPORTANT: DO NOT write `def generate_test_vectors():` or `def golden_model(model_state, inputs):`. "
+            "DO NOT write any import statements. Output ONLY the Python logic that goes INSIDE these functions. "
+            "Separate the two logic blocks using the special marker `===GOLDEN_MODEL===`.\n"
+            f"{hybrid_section}"
+            "CRITICAL REASONING RULE: Do not guess the signal dependencies. Trace the paths provided in the RELATIONAL LOGIC MAP (GRAPH) to determine exactly which inputs drive which outputs.\n"
             "Hardware Skeleton (JSON):\n"
             f"{json.dumps(spec_dict, indent=2)}\n"
         )
@@ -515,39 +606,58 @@ class EDA_LLM_Client:
         rag_content = self._retrieve_rag_context(spec_dict)
         system_context = self._build_system_context(spec_dict, rag_content, ip_context)
         for attempt in range(3):
-            final_prompt = base_prompt + prompt_suffix
+            final_prompt = base_prompt + example_block + prompt_suffix
             raw_text = self.moe.route_task(
                 prompt=final_prompt,
-                tier=ExpertTier.TIER_CODER,
+                tier=ExpertTier.TIER_GRUNT,
                 max_tokens=4096,
                 temperature=0.1,
                 system_context=system_context,
             )
             clean_python = self.extract_python_code(raw_text)
+            parts = clean_python.split("===GOLDEN_MODEL===")
+            if len(parts) < 2:
+                print("[SYSTEM] Oracle output missing ===GOLDEN_MODEL=== separator. Retrying...")
+                prompt_suffix = (
+                    "\nCRITICAL: Please separate the test vectors and golden model logic with ===GOLDEN_MODEL===.\n"
+                )
+                continue
+            test_body = parts[0].strip()
+            golden_body = parts[1].strip()
+            normalized_test = self._normalize_function_body(
+                test_body,
+                "    test_vectors = []\n    return test_vectors",
+            )
+            normalized_golden = self._normalize_function_body(
+                golden_body,
+                "    expected_output = {}\n    return model_state, expected_output",
+            )
             try:
-                ast.parse(clean_python)
-                local_scope = {}
-                exec(clean_python, globals(), local_scope)
-                if "generate_test_vectors" not in local_scope or "golden_model" not in local_scope:
-                    raise ValueError("Missing required functions 'generate_test_vectors' or 'golden_model'.")
-                test_vecs = local_scope["generate_test_vectors"]()
-                if not isinstance(test_vecs, list) or len(test_vecs) < 5:
-                    raise ValueError(f"generate_test_vectors must return a list of at least 5 dictionaries. Got: {test_vecs}")
-                local_scope["golden_model"]({}, test_vecs[0])
-                return {"golden_model_and_test_generator": clean_python}
+                ast.parse(
+                    "def generate_test_vectors():\n"
+                    + normalized_test
+                    + "\n\n"
+                    + "def golden_model(model_state, inputs):\n"
+                    + normalized_golden
+                )
             except SyntaxError as exc:
                 print(f"[SYSTEM] Oracle Python syntax error: {exc}. Retrying...")
                 prompt_suffix = (
-                    f"\nCRITICAL: Your Python code failed ast.parse() with SyntaxError: {exc}. "
-                    "Fix your commas, brackets, and indentation.\n"
+                    f"\nCRITICAL: Your Python logic failed ast.parse() with SyntaxError: {exc}. "
+                    "Fix your indentation or stray keywords.\n"
                 )
+                continue
             except Exception as exc:
-                print(f"[SYSTEM] Oracle Python execution error: {exc}. Retrying...")
+                print(f"[SYSTEM] Oracle Python error: {exc}. Retrying...")
                 prompt_suffix = (
-                    f"\nCRITICAL: Your Python code passed syntax checks, but crashed during sandbox execution with: "
-                    f"{type(exc).__name__}: {exc}. Ensure you import any required libraries (like random or math) inside your functions, "
-                    "and verify your variable logic.\n"
+                    f"\nCRITICAL: Unexpected issue when validating logic: {type(exc).__name__}: {exc}.\n"
                 )
+                continue
+            return {
+                "test_vector_body": normalized_test,
+                "golden_model_body": normalized_golden,
+            }
+        raise ValueError("Unable to generate a syntax-valid Python oracle after 3 attempts.")
         raise ValueError("Unable to generate a syntax-valid Python oracle after 3 attempts.")
 
     # ------------------------------------------------------------------

@@ -35,16 +35,48 @@ def generate_templates(spec_dict: dict, workspace_dir: Path):
     mod_name = spec_dict.get("module_name", "design")
     component_class = spec_dict.get("component_class")
 
-    # ---> NEW: ISOLATE THE PYTHON GOLDEN MODEL AND TEST GENERATOR <---
-    # Extract both python functions from the Pydantic spec
-    golden_code = spec_dict.get("golden_model_python", "def golden_model(state, inputs):\n    return state, {}")
-    test_gen_code = spec_dict.get("test_vector_generator_python", "def generate_test_vectors():\n    return []")
-    
-    # Combine them into a single Python file so the testbench can import both
-    combined_python = f"{golden_code}\n\n{test_gen_code}"
-    
+    def _ensure_body(body: str, fallback: str) -> str:
+        cleaned = body.strip()
+        if not cleaned:
+            cleaned = fallback.strip()
+        normalized = []
+        for line in cleaned.splitlines():
+            if not line.strip():
+                normalized.append("")
+                continue
+            normalized.append(line if line.startswith("    ") else f"    {line}")
+        return "\n".join(normalized)
+
+    test_body = spec_dict.get("test_vector_body")
+    golden_body = spec_dict.get("golden_model_body")
+
+    if test_body and golden_body:
+        normalized_test = _ensure_body(
+            test_body, "    test_vectors = []\n    return test_vectors"
+        )
+        normalized_golden = _ensure_body(
+            golden_body,
+            "    expected_output = {}\n    return model_state, expected_output",
+        )
+        final_python_code = f"""
+import random
+import math
+# Add any other required standard libraries here
+
+def generate_test_vectors():
+{normalized_test}
+
+def golden_model(model_state, inputs):
+{normalized_golden}
+"""
+    else:
+        final_python_code = spec_dict.get(
+            "golden_model_python",
+            "def golden_model(state, inputs):\n    return state, {}\n",
+        )
+
     golden_path = workspace_dir / "golden_model.py"
-    golden_path.write_text(combined_python, encoding="utf-8")
+    golden_path.write_text(final_python_code, encoding="utf-8")
 
     # 1. RENDER TESTBENCH
     tb_template_name = _testbench_template_name(component_class)

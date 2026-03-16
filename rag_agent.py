@@ -27,6 +27,9 @@ from __future__ import annotations
 import os
 from pathlib import Path
 from typing import Dict, List, Optional
+import re
+
+import networkx as nx
 
 import chromadb
 from chromadb.utils import embedding_functions
@@ -45,6 +48,8 @@ _EMBED_MODEL = os.getenv("HARDWARE_RAG_EMBED_MODEL", "all-MiniLM-L6-v2")
 
 # Default ChromaDB collection name
 _DEFAULT_COLLECTION_NAME = "hardware_specs"
+# Specialized collection for curated Python oracles
+_TESTBENCH_COLLECTION_NAME = "testbench_examples"
 
 # How many characters per chunk when splitting documents.
 _CHUNK_SIZE = 500
@@ -229,6 +234,11 @@ class HardwareRAG:
         )
         return formatted
 
+    def has_collection(self, name: str) -> bool:
+        """Check whether the given collection is available."""
+        actual = self._collection_name(name)
+        return actual in self._collections
+
     def list_sources(self, collection_name: Optional[str] = None) -> List[str]:
         """Return the unique filenames currently stored in the collection."""
         target_collection = self._collection_for(collection_name)
@@ -288,6 +298,96 @@ class HardwareRAG:
                     start += chunk_size - overlap
 
         return [c for c in chunks if c.strip()]
+
+
+class GraphRAG:
+    """Lightweight relational graph retriever for hardware modules."""
+
+    def __init__(self, edges: List[tuple[str, str, str]] | None = None):
+        self.graph = nx.DiGraph()
+        for subj, predicate, obj in edges or []:
+            self.add_relation(subj, predicate, obj)
+
+    def add_relation(self, subject: str, predicate: str, obj: str) -> None:
+        self.graph.add_edge(subject, obj, relation=predicate)
+
+    def add_node(self, module_name: str, attrs: dict | None = None) -> None:
+        if attrs:
+            self.graph.add_node(module_name, **attrs)
+        else:
+            self.graph.add_node(module_name)
+
+    def extract_subgraph(self, query: str) -> str:
+        if self.graph.number_of_edges() == 0:
+            return "Graph database is empty."
+        keywords = {token.lower() for token in re.findall(r"\w+", query)}
+        matches = {
+            node for node in self.graph.nodes if any(keyword in node.lower() for keyword in keywords)
+        }
+        if not matches:
+            return "No relational data found for this query."
+        relations = []
+        for subj, obj, data in self.graph.edges(data=True):
+            if subj in matches or obj in matches:
+                relations.append(f"{subj} -> {data.get('relation')} -> {obj}")
+        if not relations:
+            return "No adjacent relations matched this query."
+        return "\n".join(relations)
+
+
+class HybridRAG:
+    """Combines vector and graph retrieval for a hybrid context."""
+
+    def __init__(
+        self,
+        *,
+        persist_dir: str = _CHROMA_PERSIST_DIR,
+        embed_model: str = _EMBED_MODEL,
+        vector_collections: List[str] | None = None,
+        graph_edges: List[tuple[str, str, str]] | None = None,
+    ):
+        self.vector_db = HardwareRAG(
+            persist_dir=persist_dir,
+            embed_model=embed_model,
+            collections=vector_collections,
+        )
+        self.graph_db = GraphRAG(edges=graph_edges)
+
+    def retrieve_hybrid_context(self, query: str) -> str:
+        vector_context = self.vector_db.retrieve_context(query)
+        graph_context = self.graph_db.extract_subgraph(query)
+        combined_context = (
+            "=== FACTUAL CONTEXT (VECTOR) ===\n"
+            f"{vector_context}\n\n"
+            "=== RELATIONAL LOGIC MAP (GRAPH) ===\n"
+            f"{graph_context}"
+        )
+        return combined_context
+
+    def retrieve_context(self, query: str, n_results: int = 3, collection_name: Optional[str] = None) -> str:
+        return self.vector_db.retrieve_context(query, n_results=n_results, collection_name=collection_name)
+
+    def has_collection(self, name: str) -> bool:
+        return self.vector_db.has_collection(name)
+
+    def insert_graph_node(self, module_name: str, inputs: list[dict], outputs: list[dict]) -> None:
+        attrs = {
+            "inputs": [port.get("name") for port in inputs if port.get("name")],
+            "outputs": [port.get("name") for port in outputs if port.get("name")],
+        }
+        self.graph_db.add_node(module_name, attrs=attrs)
+
+    def add_relation(self, subject: str, predicate: str, obj: str) -> None:
+        self.graph_db.add_relation(subject, predicate, obj)
+
+
+def TestbenchRAG(*, persist_dir: str = _CHROMA_PERSIST_DIR, embed_model: str = _EMBED_MODEL):
+    """Convenience helper to spin up a RAG tuned to testbench examples."""
+    return HardwareRAG(
+        persist_dir=persist_dir,
+        embed_model=embed_model,
+        collections=[_TESTBENCH_COLLECTION_NAME],
+    )
 
 
 # ---------------------------------------------------------------------------

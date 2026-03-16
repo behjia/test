@@ -1,3 +1,4 @@
+import re
 import argparse
 import json
 import os
@@ -8,9 +9,10 @@ import requests
 from pathlib import Path
 from telemetry import log_pipeline_run 
 from verifier import run_verification
-from rag_agent import HardwareRAG
+from rag_agent import HybridRAG
 from llm_client import EDA_LLM_Client
 from models import ArchitecturePlan, HardwareSpec, SystemTask
+from ip_manager import IPManager
 import formal_verifier
 
 # Note: Adjust these imports if your actual file names differ
@@ -53,7 +55,7 @@ if __name__ == "__main__":
         ai_client = EDA_LLM_Client(rag=None)
     else:
         base_request = "Design a single-cycle 32-bit RISC-V CPU core implementing the OSOC F6 minirv subset."
-        rag = HardwareRAG(collections=["hardware_specs"])
+        rag = HybridRAG(vector_collections=["hardware_specs"])
         rag_context = rag.retrieve_context(base_request, n_results=3)
         test_request = base_request
         if rag_context:
@@ -77,7 +79,11 @@ if __name__ == "__main__":
             print(f"❌ Architecture decomposition failed: {plan}")
             sys.exit(1)
     os.makedirs("ip_library", exist_ok=True)
+    ip_mgr = IPManager()
 
+    modules_by_class: dict[str, list[str]] = {}
+    for t in plan.tasks:
+        modules_by_class.setdefault(t.component_class, []).append(t.module_name)
     idx = 0
     MAX_TOTAL_TASKS = 25
     consecutive_failures = 0
@@ -90,6 +96,21 @@ if __name__ == "__main__":
         if os.path.exists(ip_path):
             print(f"[SYSTEM] Verified IP found for '{task.module_name}'. Skipping generation.")
             idx += 1
+            continue
+
+        is_too_complex = (
+            "core" in task.module_name.lower()
+            or "cpu" in task.module_name.lower()
+            or "system" in task.module_name.lower()
+        )
+        if is_too_complex and task.component_class != "TOP_LEVEL":
+            print(f"[SYSTEM] Heuristic triggered: Task '{task.module_name}' is too complex for single-shot generation. Proactively decomposing...")
+            new_plan = ai_client.decompose_architecture(task.prompt, force_submodules=True)
+            if isinstance(new_plan, str):
+                print(f"❌ Heuristic re-plan failed: {new_plan}")
+                sys.exit(1)
+            plan.tasks[idx:idx+1] = new_plan.tasks
+            replan_requested = True
             continue
 
         print(f"\n=== EXECUTING TASK {idx + 1}/{len(plan.tasks)}: {task.module_name} ===")
@@ -118,15 +139,23 @@ if __name__ == "__main__":
             "    return state, inputs\n"
         )
         if spec_dict.get("component_class", "").upper() == "FSM":
-            oracle_code = {"golden_model_and_test_generator": dummy_oracle}
+            oracle_code = {
+                "test_vector_body": "    return [{'opcode': 0}]",
+                "golden_model_body": "    return state, inputs",
+            }
         else:
-            oracle_code = ai_client.generate_verification_oracle(spec_dict, oracle_prompt)
+            oracle_code = ai_client.generate_verification_oracle(
+                spec_dict,
+                oracle_prompt,
+                module_name=task.module_name,
+                component_class=task.component_class,
+            )
             if isinstance(oracle_code, str):
                 print(f"❌ Oracle generation failed for {task.module_name}: {oracle_code}")
                 sys.exit(1)
 
-        spec_dict["golden_model_python"] = oracle_code["golden_model_and_test_generator"]
-        spec_dict["test_vector_generator_python"] = ""
+        spec_dict["test_vector_body"] = oracle_code["test_vector_body"]
+        spec_dict["golden_model_body"] = oracle_code["golden_model_body"]
 
         module_name = spec.module_name
         workspace_dir = "workspace"
@@ -261,13 +290,6 @@ if __name__ == "__main__":
         formal_passed = True
 
         consecutive_failures = 0
-        shutil.copy(
-            os.path.join(winner["workspace"], "design.sv"),
-            os.path.join("ip_library", f"{task.module_name}.sv"),
-        )
-        with open(os.path.join("ip_library", f"{task.module_name}.json"), "w", encoding="utf-8") as f:
-            json.dump(spec_dict, f, indent=2)
-            
         log_pipeline_run(
             module_name=module_name,
             spec_model=ai_client.spec_model,
@@ -291,6 +313,12 @@ if __name__ == "__main__":
                 print("✅ SYNTHESIS SUCCESS!")
                 print(f"📊 HARDWARE COST (AREA): {synth_metrics['gate_count']} Logic Gates")
                 print(f"⏱️  SYNTHESIS TIME: {synth_metrics['execution_time']:.2f} seconds")
+                ip_mgr.save_ip(
+                    task.module_name,
+                    os.path.join(winner["workspace"], "design.sv"),
+                    spec_dict,
+                    synth_metrics,
+                )
                 
                 # OPTIMIZATION: Only run OpenLane if it is the Top-Level CPU!
                 if spec_dict.get("component_class", "").upper() == "TOP_LEVEL":
@@ -300,6 +328,23 @@ if __name__ == "__main__":
                     pass
                 else:
                     print(f"[SYSTEM] Skipping OpenLane physical layout for sub-module.")
+
+            if ai_client.rag:
+                ai_client.rag.insert_graph_node(
+                    task.module_name,
+                    spec_dict.get("inputs", []),
+                    spec_dict.get("outputs", []),
+                )
+                if task.component_class == "TOP_LEVEL":
+                    for fsm_module in modules_by_class.get("FSM", []):
+                        for datapath_module in modules_by_class.get("DATAPATH", []):
+                            ai_client.rag.add_relation(fsm_module, "controls", datapath_module)
+                    for other_module in plan.tasks:
+                        if other_module.module_name == task.module_name:
+                            continue
+                        ai_client.rag.add_relation(
+                            task.module_name, "integrates", other_module.module_name
+                        )
 
         # Cleanup the workspace AFTER synthesis is done
         shutil.rmtree("workspace", ignore_errors=True)
