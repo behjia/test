@@ -1,0 +1,14 @@
+module {{ module_name }} (
+{% for port in inputs %}
+    input logic [{{ port.width - 1 }}:0] {{ port.name }},
+{% endfor %}
+{% for port in outputs %}
+    output logic [{{ port.width - 1 }}:0] {{ port.name }}{% if not loop.last %},{% endif %}
+{% endfor %}
+);
+
+// --- AI GENERATED INTERNAL LOGIC ---
+{{ internal_logic }}
+// -----------------------------------
+
+endmodule

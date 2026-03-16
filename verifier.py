@@ -16,12 +16,24 @@ from rag_agent import HardwareRAG
 # ---------------------------------------------------------------------------
 _TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
 
+_COMPONENT_CLASS_JINJA_ROUTES = {
+    "FSM": "FSM_Assertions.jinja",
+    "DATAPATH": "Math_Equivalence.jinja",
+    "TOP_LEVEL": "cpu_integration_test.py.jinja",
+}
+
+def _testbench_template_name(component_class: str | None) -> str:
+    if not component_class:
+        return "testbench.py.jinja"
+    return _COMPONENT_CLASS_JINJA_ROUTES.get(component_class.upper(), "testbench.py.jinja")
+
 _ERROR_TAG_PATTERN = re.compile(r"%Error[-:]\s*([A-Z][A-Z0-9_]+)", re.IGNORECASE)
 _DIAGNOSTIC_RAG: HardwareRAG | None = None
 def generate_templates(spec_dict: dict, workspace_dir: Path):
     """Dynamically generates testbench, AXI wrappers, and C drivers."""
     env = Environment(loader=FileSystemLoader(str(_TEMPLATES_DIR)))
     mod_name = spec_dict.get("module_name", "design")
+    component_class = spec_dict.get("component_class")
 
     # ---> NEW: ISOLATE THE PYTHON GOLDEN MODEL AND TEST GENERATOR <---
     # Extract both python functions from the Pydantic spec
@@ -35,11 +47,13 @@ def generate_templates(spec_dict: dict, workspace_dir: Path):
     golden_path.write_text(combined_python, encoding="utf-8")
 
     # 1. RENDER TESTBENCH
-    tb_template = env.get_template("testbench.py.jinja")
+    tb_template_name = _testbench_template_name(component_class)
+    tb_template = env.get_template(tb_template_name)
     tb_rendered = tb_template.render(
         module_name=mod_name,
         inputs=spec_dict.get("inputs", []),
         outputs=spec_dict.get("outputs", []),
+        component_class=component_class,
         test_vectors=spec_dict.get("test_vectors", []),
         is_sequential=spec_dict.get("is_sequential", False)
         # Note: We deleted the golden_model_python injection here!
@@ -122,13 +136,53 @@ def run_verification(workspace_dir: str, fallback_module_name: str,
         test file from the Jinja2 template before running ``make``.
     """
     target_path = Path(workspace_dir)
-    # ----- AUTO-DETECT MODULE NAME VIA REGEX -----
+    # ----- FAST SYNTAX LINT CHECK -----
+    syntax_lint_cmd = [
+        "verilator",
+        "--lint-only",
+        "-Wall",
+        "-Wno-DECLFILENAME",
+        "design.sv",
+    ]
+    lint_syntax = subprocess.run(
+        syntax_lint_cmd,
+        cwd=target_path,
+        capture_output=True,
+        text=True,
+    )
+    if lint_syntax.returncode != 0:
+        return {
+            "workspace": workspace_dir,
+            "status": "FAIL",
+            "execution_time": 0.0,
+            "log": "[SYNTAX LINT ERROR]\n" + lint_syntax.stderr,
+            "vcd_snapshot": None,
+            "error_tags": [],
+            "diagnostic_context": None,
+            "error_type": "SYNTAX",
+        }
     verilog_file = target_path / "design.sv"
     actual_name = fallback_module_name
+
+    # ----- BUILD HARDWARE WRAPPER AROUND INTERNAL LOGIC -----
+    if spec_dict is not None and verilog_file.exists():
+        internal_logic = verilog_file.read_text(encoding="utf-8")
+        actual_name = spec_dict.get("module_name", fallback_module_name)
+        env = Environment(loader=FileSystemLoader(str(_TEMPLATES_DIR)))
+        wrapper_template = env.get_template("hardware_wrapper.sv.jinja")
+        wrapped = wrapper_template.render(
+            module_name=actual_name,
+            inputs=spec_dict.get("inputs", []),
+            outputs=spec_dict.get("outputs", []),
+            internal_logic=internal_logic,
+        )
+        verilog_file.write_text(wrapped, encoding="utf-8")
+
+    # ----- AUTO-DETECT MODULE NAME VIA REGEX -----
     if verilog_file.exists():
         with open(verilog_file, "r", encoding="utf-8") as f:
             verilog_content = f.read()
-            match = re.search(r"module\s+([a-zA-Z0-9_]+)", f.read())
+            match = re.search(r"module\s+([a-zA-Z0-9_]+)", verilog_content)
             if match:
                 actual_name = match.group(1)
 
@@ -178,6 +232,33 @@ def run_verification(workspace_dir: str, fallback_module_name: str,
     sim_build = target_path / "sim_build"
     if sim_build.exists():
         shutil.rmtree(sim_build)
+    # ----- PRE-FLIGHT LINT CHECK -----
+    lint_result = subprocess.run(
+        [
+            "verilator",
+            "--lint-only",
+            "-Wall",
+            "-Werror-LATCH",
+            "-Werror-MULTIDRIVEN",
+            "-Wno-DECLFILENAME",
+            "-sv",
+            "design.sv",
+        ],
+        cwd=target_path,
+        capture_output=True,
+        text=True,
+    )
+    if lint_result.returncode != 0:
+        return {
+            "workspace": workspace_dir,
+            "status": "FAIL_LINT",
+            "execution_time": 0.0,
+            "log": "[PRE-FLIGHT LINT ERROR]\n" + lint_result.stderr,
+            "vcd_snapshot": None,
+            "error_tags": [],
+            "diagnostic_context": None,
+            "error_type": "PHYSICAL",
+        }
     start_time = time.time()
     # ----- RUN MAKE -----
     result = subprocess.run(
@@ -187,24 +268,46 @@ def run_verification(workspace_dir: str, fallback_module_name: str,
         text=True,
     )
     execution_time = time.time() - start_time
-    log_output = result.stdout + result.stderr
-    # ----- FOCUS THE LOG -----
-    lines = log_output.splitlines()
-    error_lines = [
-        l for l in lines
-        if any(kw in l.lower() for kw in
-               ["error", "assert", "fail", "mismatch", "expected"])
-    ]
-    if error_lines:
-        focused_log = (
-            "[...KEY ERRORS EXTRACTED...]\n"
-            + "\n".join(error_lines[-30:])
-            + "\n\n[...LAST 20 LINES...]\n"
-            + "\n".join(lines[-20:])
-        )
-        log_output = focused_log
-    elif len(lines) > 50:
-        log_output = "[...TRUNCATED LOG...]\n" + "\n".join(lines[-50:])
+    raw_log = result.stdout + result.stderr
+    lines = raw_log.splitlines()
+
+    distilled_entries: list[str] = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if line.startswith("%Error:") or line.startswith("%Warning:"):
+            distilled_entries.append(line)
+        if "AssertionError:" in line or "FAILED" in line:
+            distilled_entries.append(line)
+            for j in range(1, 4):
+                if i + j < len(lines):
+                    distilled_entries.append(lines[i + j])
+            i += 3
+        if "SyntaxError:" in line or "Traceback" in line:
+            distilled_entries.append(line)
+        i += 1
+
+    # Prefer the AssertionError + Hardware Output / Golden Model view
+    assertion_snippet: list[str] = []
+    for idx, line in enumerate(lines):
+        if "AssertionError" in line:
+            assertion_snippet.append(line)
+            for j in range(idx + 1, len(lines)):
+                if lines[j].startswith("Hardware Output:") or lines[j].startswith("Golden Model Expected:"):
+                    assertion_snippet.append(lines[j])
+                elif lines[j].strip() == "":
+                    break
+            break
+
+    if assertion_snippet:
+        log_output = "\n".join(assertion_snippet)
+    else:
+        distilled_log = "\n".join(distilled_entries).strip()
+        if not distilled_log:
+            distilled_log = "\n".join(lines[-20:])
+        if len(distilled_log) > 2000:
+            distilled_log = distilled_log[:2000]
+        log_output = distilled_log
     
     # ----- DETERMINE STATUS -----
     status = (
@@ -261,6 +364,7 @@ def run_verification(workspace_dir: str, fallback_module_name: str,
         diagnostic_context = _build_diagnostic_context(error_tags)
 
     # ----- RETURN RESULTS -----
+    error_type_out = None if status == "PASS" else "LOGIC"
     return {
         "workspace": workspace_dir,
         "status": status,
@@ -270,4 +374,5 @@ def run_verification(workspace_dir: str, fallback_module_name: str,
         "vcd_snapshot": vcd_data_for_test,  # <--- Added for test_vcd.py to verify
         "error_tags": error_tags,
         "diagnostic_context": diagnostic_context or None,
+        "error_type": error_type_out,
     }

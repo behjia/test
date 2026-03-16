@@ -15,6 +15,7 @@ from rag_agent import HardwareRAG
 
 # Silence litellm's verbose success messages; keep warnings/errors
 litellm.success_callback = []
+litellm.cache = litellm.Cache(type='disk')
 
 # Load local .env file if it exists
 load_dotenv()
@@ -100,6 +101,7 @@ class MoE_Client:
         tier: ExpertTier,
         *,
         system_prompt: str | None = None,
+        system_context: str | None = None,
         max_tokens: int = 2048,
         temperature: float = 0.2,
     ) -> str:
@@ -132,9 +134,28 @@ class MoE_Client:
             Any other API or network error is re-raised immediately.
         """
         sys_msg = system_prompt if system_prompt is not None else self.default_system_prompt
-        messages = []
+        use_claude = (
+            "claude" in (tier.primary or "")
+            or (tier.fallback and "claude" in tier.fallback)
+        )
+
+        messages: list[dict] = []
+        if system_context:
+            if use_claude:
+                messages.append({
+                    "role": "system",
+                    "content": [{"type": "text", "text": system_context, "cache_control": {"type": "ephemeral"}}],
+                })
+            else:
+                messages.append({"role": "system", "content": system_context})
         if sys_msg:
-            messages.append({"role": "system", "content": sys_msg})
+            if use_claude:
+                messages.append({
+                    "role": "system",
+                    "content": [{"type": "text", "text": sys_msg, "cache_control": {"type": "ephemeral"}}],
+                })
+            else:
+                messages.append({"role": "system", "content": sys_msg})
         messages.append({"role": "user", "content": prompt})
 
         # ---- Attempt primary model ----
@@ -209,7 +230,7 @@ class EDA_LLM_Client:
         ----------
         rag:
             Optional :class:`~rag_agent.HardwareRAG` instance.  When provided,
-            ``generate_variations`` will retrieve relevant spec rules from the
+            ``generate_rtl`` will retrieve relevant spec rules from the
             vector DB and inject them into the system prompt before every
             RTL generation call.  Pass ``None`` (default) to run without RAG.
         """
@@ -240,6 +261,74 @@ class EDA_LLM_Client:
 
         # Optional RAG agent — set to None to disable context retrieval
         self.rag: HardwareRAG | None = rag
+
+    def _render_ip_library_headers(self) -> str:
+        ip_dir = Path("ip_library")
+        if not ip_dir.exists():
+            return ""
+        headers = []
+        for json_path in sorted(ip_dir.glob("*.json")):
+            try:
+                data = json.loads(json_path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            module_name = data.get("module_name")
+            inputs = data.get("inputs", [])
+            outputs = data.get("outputs", [])
+            if not module_name:
+                continue
+            port_lines = []
+            for port in inputs:
+                width = port.get("width", 1)
+                name = port.get("name")
+                if not name:
+                    continue
+                if width == 1:
+                    port_lines.append(f"    input logic {name}")
+                else:
+                    port_lines.append(f"    input logic [{width-1}:0] {name}")
+            for port in outputs:
+                width = port.get("width", 1)
+                name = port.get("name")
+                if not name:
+                    continue
+                if width == 1:
+                    port_lines.append(f"    output logic {name}")
+                else:
+                    port_lines.append(f"    output logic [{width-1}:0] {name}")
+            header = f"module {module_name} (\n" + ",\n".join(port_lines) + "\n);"
+            headers.append(header)
+        return "\n".join(headers)
+
+    def _retrieve_rag_context(self, spec_dict: dict) -> str:
+        if self.rag is None:
+            return ""
+        query = (
+            f"{spec_dict.get('module_name', '')} "
+            f"{spec_dict.get('description', '')} "
+            f"{'sequential' if spec_dict.get('is_sequential', False) else 'combinational'}"
+        ).strip()
+        try:
+            retrieved = self.rag.retrieve_context(query, n_results=3)
+        except Exception as exc:
+            print(f"  [RAG] ⚠️  Retrieval failed: {exc}")
+            return ""
+        if retrieved:
+            print(f"  [RAG] ✅ Context cached ({len(retrieved)} chars).")
+            return retrieved
+        print("  [RAG] ⚠️  No relevant rules found in DB.")
+        return ""
+
+    def _build_system_context(self, spec_dict: dict, rag_text: str, ip_context: str) -> str:
+        sections = [
+            "=== SYSTEM CONTEXT ===",
+            "Hardware Specification:\n" + json.dumps(spec_dict, indent=2),
+        ]
+        if rag_text:
+            sections.append("RAG Rules:\n" + rag_text)
+        if ip_context:
+            sections.append("IP Library Interfaces:\n" + ip_context)
+        return "\n\n".join(sections)
 
     @staticmethod
     # ------------------------------------------------------------------
@@ -361,7 +450,7 @@ class EDA_LLM_Client:
         try:
             plan: ArchitecturePlan = self.instructor_client.chat.completions.create(
                 model=ExpertTier.TIER_GRUNT.primary,
-                max_tokens=2048,
+                max_tokens=8192,
                 temperature=0.1,
                 messages=[
                     {"role": "system", "content": "You are a Lead CPU Architect and decomposition expert."},
@@ -422,6 +511,9 @@ class EDA_LLM_Client:
         )
 
         prompt_suffix = ""
+        ip_context = self._render_ip_library_headers()
+        rag_content = self._retrieve_rag_context(spec_dict)
+        system_context = self._build_system_context(spec_dict, rag_content, ip_context)
         for attempt in range(3):
             final_prompt = base_prompt + prompt_suffix
             raw_text = self.moe.route_task(
@@ -429,6 +521,7 @@ class EDA_LLM_Client:
                 tier=ExpertTier.TIER_CODER,
                 max_tokens=4096,
                 temperature=0.1,
+                system_context=system_context,
             )
             clean_python = self.extract_python_code(raw_text)
             try:
@@ -458,162 +551,125 @@ class EDA_LLM_Client:
         raise ValueError("Unable to generate a syntax-valid Python oracle after 3 attempts.")
 
     # ------------------------------------------------------------------
-    # RTL variation generation (unchanged — free-form text output)
+    # Single-shot RTL generation
     # ------------------------------------------------------------------
-    def generate_variations(self, spec: HardwareSpec | dict, num_variations: int = 3):
+    def generate_rtl(self, spec: HardwareSpec | dict) -> str:
         spec_dict = spec.model_dump() if isinstance(spec, HardwareSpec) else spec
-        print(
-            f"\n[SYSTEM] Generating {num_variations} RTL variations using "
-            f"Claude Sonnet (TIER_CODER)..."
-        )
-        variations = []
+        print("\n[SYSTEM] Generating a single high-quality RTL implementation using Claude Sonnet...")
+        STYLE_GUIDES: dict[str, str] = {
+            "FSM": (
+                "Use typedef enum for state encoding. Use always_ff @(posedge clk) for state updates. "
+                "Separate next-state logic into a combinational block (always_comb)."
+            ),
+            "DATAPATH": (
+                "Use always_comb for all logic. Prioritize standard Verilog operators. Do not use sequential logic."
+            ),
+            "MEMORY": (
+                "Use a standard multi-dimensional array reg [width-1:0] mem [0:depth-1]. Clearly distinguish "
+                "between read/write clock edges."
+            ),
+            "INTERCONNECT": (
+                "Use ternary operators or case statements for multiplexing. Minimize logic levels to reduce wire delay."
+            ),
+            "TOP_LEVEL": (
+                "DO NOT write logic. ONLY instantiate sub-modules. Use positional port mapping for reliability."
+            ),
+        }
 
-        # 1. Check if the Planner Agent decided this needs a clock
         is_seq = spec_dict.get("is_sequential", False)
-        if is_seq:
-            timing_rules = (
-                "1. This is a SEQUENTIAL design. You MUST include a 'clk' input.\n"
-                "2. Use standard synchronous design practices (always_ff @(posedge clk)).\n"
-                "3. Ensure proper reset behavior if an rst or rst_n port is specified."
-            )
-        else:
-            timing_rules = (
-                "1. This design must be PURELY COMBINATIONAL. Do NOT use clk, rst, or any sequential logic.\n"
-                "2. Use always_comb with logic type variables, or pure assign statements.\n"
-                "3. Include an 'initial begin #1; end' block for Verilator VM_TIMING compatibility.\n"
-                "4. CRITICAL SYNTHESIS RULE: You MUST wrap any timing constructs (like #1) in an ifndef block so synthesis tools ignore them. Like this:\n"
-                "   `ifndef SYNTHESIS\n"
-                "   initial begin #1; end\n"
-                "   `endif"
-            )
+        timing_rules = (
+            "1. This is a SEQUENTIAL design. You MUST include a 'clk' input.\n"
+            "2. Use standard synchronous design practices (always_ff @(posedge clk)).\n"
+            "3. Ensure proper reset behavior if an rst or rst_n port is specified."
+            if is_seq else
+            "1. This design must be PURELY COMBINATIONAL. Do NOT use clk, rst, or any sequential logic.\n"
+            "2. Use always_comb with logic type variables, or pure assign statements.\n"
+            "3. Include an 'initial begin #1; end' block for Verilator VM_TIMING compatibility.\n"
+            "4. CRITICAL SYNTHESIS RULE: You MUST wrap any timing constructs (like #1) in an ifndef block so synthesis tools ignore them."
+        )
 
-        # 2. Extract the dynamic DSE strategies generated by the Planner Agent
-        strategies = spec_dict.get("dse_strategies", [
-            "Write standard behavioral RTL.", "Focus on area.", "Focus on speed."
-        ])
-        available_interfaces = ""
-        ip_dir = Path("ip_library")
-        if ip_dir.exists():
-            interface_lines = []
-            for json_path in sorted(ip_dir.glob("*.json")):
-                try:
-                    with open(json_path, "r", encoding="utf-8") as fh:
-                        data = json.load(fh)
-                except Exception:
-                    continue
-                module_name = data.get("module_name")
-                inputs = data.get("inputs")
-                outputs = data.get("outputs")
-                parameters = data.get("parameters")
-                if not module_name:
-                    continue
-                interface_lines.append(
-                    f"{module_name}: inputs={inputs}, outputs={outputs}, parameters={parameters}"
-                )
-            if interface_lines:
-                available_interfaces = "\n".join(interface_lines)
+        components = spec_dict.get("component_class", "")
+        style_text = STYLE_GUIDES.get(components.upper(), "")
+        style_section = (
+            "SYSTEM-ENFORCED CODING STYLE:\n"
+            f"{style_text}\n\n" if style_text
+            else "SYSTEM-ENFORCED CODING STYLE:\nNo additional style constraints provided.\n\n"
+        )
 
-        # ------------------------------------------------------------------
-        # 3. RAG CONTEXT RETRIEVAL
-        # Build a semantic query from the spec so the vector DB can return
-        # the most relevant opcode tables, bus rules, or timing constraints.
-        # This block runs once per generate_variations() call, not per variation,
-        # because all variations share the same architectural requirements.
-        # ------------------------------------------------------------------
+        ip_context = self._render_ip_library_headers()
+
+        rag_content = self._retrieve_rag_context(spec_dict)
         rag_context_block = ""
-        if self.rag is not None:
-            rag_query = (
-                f"{spec_dict.get('module_name', '')} "
-                f"{spec_dict.get('description', '')} "
-                f"{'sequential' if is_seq else 'combinational'}"
-            ).strip()
-            print(f"  [RAG] Querying vector DB with: '{rag_query[:80]}...'")
-            retrieved = self.rag.retrieve_context(rag_query, n_results=3)
-            if retrieved:
-                rag_context_block = (
-                    "\n\n=== RETRIEVED HARDWARE SPECIFICATIONS ===\n"
-                    "The following rules are AUTHORITATIVE. They are extracted from\n"
-                    "verified hardware specification documents. You MUST follow them\n"
-                    "exactly. Do NOT invent opcodes, signal names, or bus rules.\n\n"
-                    f"{retrieved}\n"
-                    "=== END OF RETRIEVED SPECIFICATIONS ==="
-                )
-                print(f"  [RAG] ✅ Context injected ({len(rag_context_block)} chars).")
-            else:
-                print("  [RAG] ⚠️  No relevant rules found in DB. Proceeding without RAG context.")
-
-        # Build the RAG-augmented system prompt once and reuse it for all
-        # variations in this call.  When rag_context_block is empty (RAG
-        # disabled or no results) this degrades gracefully to the base prompt.
-        augmented_system_prompt = self.system_prompt + rag_context_block
-
-        golden_model_code = spec_dict.get("golden_model_python")
-        if golden_model_code:
-            golden_alignment_block = (
-                "\n\nCRITICAL ALIGNMENT: Here is the Python Golden Model used for verification. "
-                "You MUST ensure your SystemVerilog internal signal encodings (like alu_control states) "
-                "perfectly match the integer values defined in this Python code!\n\n"
-                "```python\n"
-                f"{golden_model_code}\n"
-                "```\n"
+        if rag_content:
+            rag_context_block = (
+                "\n\n=== RETRIEVED HARDWARE SPECIFICATIONS ===\n"
+                "Authoritative rules follow. You MUST obey them exactly.\n\n"
+                f"{rag_content}\n"
+                "=== END OF RETRIEVED SPECIFICATIONS ==="
             )
-        else:
-            golden_alignment_block = ""
 
-        for i in range(num_variations):
-            seed = strategies[i] if i < len(strategies) else strategies[0]
-            print(f"  -> Generating Variation {i + 1} (Strategy: {seed[:40]}...)")
+        wiring_context_block = ""
+        if ip_context:
+            wiring_context_block = (
+                "\n\nCRITICAL WIRING CONTEXT: The following verified modules are available in your library. "
+                "Use exactly these port definitions when instantiating them:\n\n"
+                f"{ip_context}\n"
+            )
 
-            wiring_context_block = ""
-            if available_interfaces:
-                wiring_context_block = (
-                    "\n\nCRITICAL WIRING CONTEXT: Here are the exact port interfaces for "
-                    "the sub-modules available in your IP library. If you instantiate any "
-                    "of these modules, you MUST wire them using EXACTLY these port names:\n"
-                    f"{available_interfaces}\n"
-                )
+        golden_alignment_block = ""
+        system_context = self._build_system_context(spec_dict, rag_content, ip_context)
 
-            prompt = f"""
-            You are a master ASIC RTL designer. Implement the following module based STRICTLY on this JSON specification:
-            {json.dumps(spec_dict, indent=2)}
+        augmented_system_prompt = (
+            self.system_prompt
+            + rag_context_block
+            + style_section
+            + wiring_context_block
+            + golden_alignment_block
+            + "\nCRITICAL RULES:\n"
+            f"{timing_rules}\n"
+            "4. The module must have ONLY the exact ports listed in the JSON. No extra ports.\n"
+            "5. DO NOT write the module declaration, port list, or endmodule. I already have the structural wrapper.\n"
+            "6. You must ONLY output the internal logic (assign statements, always_comb, or always_ff blocks).\n"
+            "7. Output ONLY the raw internal logic block. Do not explain anything.\n\n"
+            "CRITICAL CODING STANDARDS:\n"
+            "- DO NOT use massive concatenated binary literals (e.g., 13'b100...). Assign signals individually, or use cleanly formatted localparam/state definitions for clarity.\n"
+            "- CHAIN OF THOUGHT: For complex logic like decoders or control units, write a brief Truth Table/Logic Map comment immediately before the always_comb block.\n"
+            "- Always include a default: case that safely sets all outputs to 0.\n"
+        )
 
-            {golden_alignment_block}
-            {wiring_context_block}
+        prompt = (
+            "You are a master ASIC RTL designer. Implement this module based EXACTLY on the JSON specification below.\n"
+            "DO NOT write the module declaration, port list, or endmodule. I already have the structural wrapper. "
+            "You must ONLY output the internal logic (assign statements, always_comb, or always_ff blocks) required "
+            "to connect the inputs to the outputs.\n"
+            "Wrap your output in a ```internal_logic``` code block.\n\n"
+            + json.dumps(spec_dict, indent=2)
+            + "\n\nEmit only the internal logic block inside ```internal_logic```. No explanations."
+        )
 
-            STRATEGY FOR THIS VARIATION:
-            {seed}
+        try:
+            raw_text = self.moe.route_task(
+                prompt=prompt,
+                tier=ExpertTier.TIER_CODER,
+                max_tokens=8192,
+                temperature=0.8,
+                system_prompt=augmented_system_prompt,
+                system_context=system_context,
+            )
+            match = re.search(r"```(?:internal_logic)?\n(.*?)```", raw_text, re.DOTALL | re.IGNORECASE)
+            clean_logic = match.group(1).strip() if match else raw_text.strip()
 
-            CRITICAL RULES:
-            {timing_rules}
-            4. The module must have ONLY the exact ports listed in the JSON. No extra ports.
-            5. Output ONLY the raw SystemVerilog code. Do not explain anything.
-            
-            CRITICAL CODING STANDARDS:
-            - DO NOT use massive concatenated binary literals (e.g., 13'b100...). Assign signals individually, or use cleanly formatted localparam definitions for states and opcodes to prevent bit-counting errors.
-            - CHAIN OF THOUGHT: For complex logic like decoders or control units, you MUST write a brief Truth Table or Logic Map in Verilog comments (//) immediately before the always_comb block to plan your routing.
-            - Always include a default: case in case statements that safely sets all outputs to 0.
-            """
-            try:
-                raw_text = self.moe.route_task(
-                    prompt=prompt,
-                    tier=ExpertTier.TIER_CODER,
-                    max_tokens=8192,
-                    temperature=0.8,
-                    system_prompt=augmented_system_prompt,  # ← RAG-injected
-                )
-                match = re.search(r"```(?:verilog|systemverilog)?(.*?)```", raw_text, re.DOTALL | re.IGNORECASE)
-                clean_verilog = match.group(1).strip() if match else raw_text.strip()
+            clean_logic = clean_logic.replace("`systemverilog\n", "")
+            clean_logic = clean_logic.replace("`verilog\n", "")
+            clean_logic = clean_logic.replace("`systemverilog", "")
 
-                # SAFETY SCRUBBER: Remove hallucinated backtick macros before saving
-                clean_verilog = clean_verilog.replace("`systemverilog\n", "")
-                clean_verilog = clean_verilog.replace("`verilog\n", "")
-                clean_verilog = clean_verilog.replace("`systemverilog", "")  # Catch it without the newline just in case
-
-                variations.append(clean_verilog)
-            except Exception as e:
-                print(f"❌ ERROR on variation {i}: {e}")
-                variations.append("module sync_fifo_16x32(); endmodule")
-        return variations
+            return clean_logic
+        except Exception as e:
+            print(f"❌ ERROR generating RTL: {e}")
+            # Return a safe Verilog comment instead of a hardcoded module.
+            # This ensures the Jinja2 wrapper renders an empty module,
+            # which will safely fail the testbench and trigger the Critic Agent.
+            return f"// FATAL ERROR during LLM generation: {e}\n// The Critic Agent will attempt to regenerate this."
     
     # ------------------------------------------------------------------
     # Self-healing fix (unchanged — free-form text output)
@@ -624,6 +680,7 @@ class EDA_LLM_Client:
         error_log: str,
         testbench_code: str = "",
         is_sequential: bool = False,
+        error_type: str = "LOGIC",
         retry_count: int = 0,
     ) -> str:
         """Takes broken SystemVerilog code, its simulator error log, and
@@ -648,10 +705,14 @@ class EDA_LLM_Client:
             Optional testbench source to give the model constraint context.
         is_sequential:
             When True, enforce sequential RTL rules; otherwise combinational.
+        error_type:
+            Failure classification reported by the verification pipeline ("SYNTAX", "LOGIC", etc.).
         retry_count:
             Number of previous failed fix attempts — controls tier escalation.
         """
-        if retry_count == 0:
+        if error_type.upper() == "SYNTAX":
+            tier = ExpertTier.TIER_GRUNT
+        elif retry_count == 0:
             tier = ExpertTier.TIER_CODER
         else:
             tier = ExpertTier.TIER_ARCHITECT
@@ -768,15 +829,14 @@ if __name__ == "__main__":
     )
     # 2. Get the validated HardwareSpec
     spec = ai_client.generate_spec(test_request)
-    # 3. Generate hardware variations
+    # 3. Generate hardware
     if isinstance(spec, HardwareSpec):
         print(f"\n📋 Validated spec: {spec.model_dump_json(indent=2)}")
-        rtl_variations = ai_client.generate_variations(spec, num_variations=3)
-        # 4. Save them to isolated folders
-        if rtl_variations:
-            sandbox_dirs = setup_workspaces(rtl_variations)
-            print("\n✅ SUCCESS: Pipeline Complete. Variations are isolated and ready for Ray.")
+        rtl_code = ai_client.generate_rtl(spec)
+        if rtl_code:
+            sandbox_dirs = setup_workspaces([rtl_code])
+            print("\n✅ SUCCESS: Pipeline Complete. RTL is isolated and ready for Ray.")
         else:
-            print("❌ ERROR: Variations list is empty.")
+            print("❌ ERROR: RTL generation failed.")
     else:
         print(f"\nAborting hardware generation due to spec failure:\n{spec}")

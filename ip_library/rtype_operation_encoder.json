@@ -1,0 +1,34 @@
+{
+  "module_name": "rtype_encoder",
+  "description": "Purely combinational encoder that maps funct3 and funct7 fields to 4-bit operation codes for R-type instructions",
+  "is_sequential": false,
+  "parameters": [],
+  "inputs": [
+    {
+      "name": "funct3",
+      "width": 3
+    },
+    {
+      "name": "funct7",
+      "width": 7
+    }
+  ],
+  "outputs": [
+    {
+      "name": "operation_code",
+      "width": 4
+    }
+  ],
+  "dse_strategies": [
+    "Flat case statement with concatenated {funct7, funct3} for minimal logic depth and fastest combinational path",
+    "Nested case statements with funct3 outer case and funct7 inner case for improved code readability and potential synthesis optimization",
+    "Priority-based if-else chain with explicit matching conditions for area-optimized implementation with shared decode logic"
+  ],
+  "internal_probes": [
+    "probe_funct_concat",
+    "probe_is_add",
+    "probe_is_recognized"
+  ],
+  "golden_model_python": "def generate_test_vectors():\n    test_vectors = []\n    \n    # Hardcoded edge cases for R-type encoder\n    # ADD instruction\n    test_vectors.append({'funct3': 0b000, 'funct7': 0b0000000})\n    \n    # Unrecognized combinations (should default to ADD=0x0)\n    test_vectors.append({'funct3': 0b001, 'funct7': 0b0000000})\n    test_vectors.append({'funct3': 0b010, 'funct7': 0b0000000})\n    test_vectors.append({'funct3': 0b011, 'funct7': 0b0000000})\n    test_vectors.append({'funct3': 0b100, 'funct7': 0b0000000})\n    test_vectors.append({'funct3': 0b101, 'funct7': 0b0000000})\n    test_vectors.append({'funct3': 0b110, 'funct7': 0b0000000})\n    test_vectors.append({'funct3': 0b111, 'funct7': 0b0000000})\n    \n    # Different funct7 values with funct3=000 (not ADD)\n    test_vectors.append({'funct3': 0b000, 'funct7': 0b0100000})\n    test_vectors.append({'funct3': 0b000, 'funct7': 0b1111111})\n    \n    # Boundary cases\n    test_vectors.append({'funct3': 0b111, 'funct7': 0b1111111})\n    test_vectors.append({'funct3': 0b000, 'funct7': 0b0000001})\n    \n    # Random combinations\n    import random\n    random.seed(42)\n    for _ in range(88):\n        test_vectors.append({\n            'funct3': random.randint(0, 7),\n            'funct7': random.randint(0, 127)\n        })\n    \n    return test_vectors\n\ndef golden_model(model_state, inputs):\n    expected_output = {}\n    \n    # Extract inputs\n    funct3 = inputs.get('funct3', 0)\n    funct7 = inputs.get('funct7', 0)\n    \n    # Truth table for R-type encoder\n    # funct3=000, funct7=0000000 -> ADD -> operation_code=0000\n    # All other combinations -> default to ADD -> operation_code=0000\n    \n    # Check for ADD instruction\n    if funct3 == 0b000 and funct7 == 0b0000000:\n        expected_output['operation_code'] = 0b0000\n    else:\n        # Default to ADD for unrecognized instructions\n        expected_output['operation_code'] = 0b0000\n    \n    return model_state, expected_output",
+  "test_vector_generator_python": ""
+}

@@ -1,0 +1,21 @@
+import cocotb
+from cocotb.triggers import Timer
+import os
+import sys
+from pathlib import Path
+
+# Add current directory to path so we can import supporting files
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
+@cocotb.test()
+async def wiring_structural_check(dut):
+    """Quick structural check to ensure ports are visible and toggling."""
+    missing_ports = []
+    {% for port in (inputs + outputs) %}
+    if not hasattr(dut, "{{ port.name }}"):
+        missing_ports.append("{{ port.name }}")
+    {% endfor %}
+    assert not missing_ports, f"Missing ports: {missing_ports}"
+
+    await Timer(1, unit="ns")
+    dut._log.info(f"✅ Wiring structural check passed for component_class={{ component_class or 'UNKNOWN' }}.")

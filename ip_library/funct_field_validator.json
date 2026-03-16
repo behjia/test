@@ -1,0 +1,34 @@
+{
+  "module_name": "rtype_validator",
+  "description": "Purely combinational validator that checks validity of funct3 and funct7 fields for R-type instructions. Validates add instruction (funct3=3'b000, funct7=7'b0000000) and marks all other combinations as invalid.",
+  "is_sequential": false,
+  "parameters": [],
+  "inputs": [
+    {
+      "name": "funct3",
+      "width": 3
+    },
+    {
+      "name": "funct7",
+      "width": 7
+    }
+  ],
+  "outputs": [
+    {
+      "name": "is_valid",
+      "width": 1
+    }
+  ],
+  "dse_strategies": [
+    "Flat combinational logic using single case statement on concatenated {funct7, funct3} for minimal logic depth and fastest propagation delay",
+    "Two-level hierarchical validation with separate funct3 and funct7 comparators feeding AND gate for improved modularity and easier extension to additional R-type instructions",
+    "Lookup table (LUT) based approach using parameter-driven valid instruction encoding array for maximum flexibility and reconfigurability"
+  ],
+  "internal_probes": [
+    "probe_funct3_match",
+    "probe_funct7_match",
+    "probe_combined_fields"
+  ],
+  "golden_model_python": "def generate_test_vectors():\n    test_vectors = []\n    \n    # Edge case 1: Valid ADD instruction (funct3=0, funct7=0)\n    test_vectors.append({'funct3': 0b000, 'funct7': 0b0000000})\n    \n    # Edge case 2: Invalid - correct funct3 but wrong funct7\n    test_vectors.append({'funct3': 0b000, 'funct7': 0b0100000})\n    \n    # Edge case 3: Invalid - wrong funct3 but correct funct7\n    test_vectors.append({'funct3': 0b001, 'funct7': 0b0000000})\n    \n    # Edge case 4: Invalid - both wrong\n    test_vectors.append({'funct3': 0b111, 'funct7': 0b1111111})\n    \n    # Edge case 5: Invalid - funct3=0 with max funct7\n    test_vectors.append({'funct3': 0b000, 'funct7': 0b1111111})\n    \n    # Edge case 6: Invalid - max funct3 with funct7=0\n    test_vectors.append({'funct3': 0b111, 'funct7': 0b0000000})\n    \n    # Edge case 7: Invalid - SUB-like encoding (funct3=0, funct7=0x20)\n    test_vectors.append({'funct3': 0b000, 'funct7': 0b0100000})\n    \n    # Edge case 8: Invalid - SLL-like (funct3=1, funct7=0)\n    test_vectors.append({'funct3': 0b001, 'funct7': 0b0000000})\n    \n    # Edge case 9: Invalid - SLT-like (funct3=2, funct7=0)\n    test_vectors.append({'funct3': 0b010, 'funct7': 0b0000000})\n    \n    # Edge case 10: Invalid - XOR-like (funct3=4, funct7=0)\n    test_vectors.append({'funct3': 0b100, 'funct7': 0b0000000})\n    \n    # Edge case 11: Invalid - SRL-like (funct3=5, funct7=0)\n    test_vectors.append({'funct3': 0b101, 'funct7': 0b0000000})\n    \n    # Edge case 12: Invalid - OR-like (funct3=6, funct7=0)\n    test_vectors.append({'funct3': 0b110, 'funct7': 0b0000000})\n    \n    # Edge case 13: Invalid - AND-like (funct3=7, funct7=0)\n    test_vectors.append({'funct3': 0b111, 'funct7': 0b0000000})\n    \n    # Random combinations for comprehensive coverage\n    import random\n    random.seed(42)\n    for _ in range(87):\n        funct3_val = random.randint(0, 7)\n        funct7_val = random.randint(0, 127)\n        test_vectors.append({'funct3': funct3_val, 'funct7': funct7_val})\n    \n    return test_vectors\n\ndef golden_model(model_state, inputs):\n    expected_output = {}\n    \n    # Extract inputs\n    funct3 = inputs.get('funct3', 0)\n    funct7 = inputs.get('funct7', 0)\n    \n    # Truth table for R-type validation\n    # Valid: ADD instruction (funct3=3'b000, funct7=7'b0000000)\n    # Invalid: All other combinations\n    \n    if funct3 == 0b000 and funct7 == 0b0000000:\n        expected_output['is_valid'] = 1\n    else:\n        expected_output['is_valid'] = 0\n    \n    return model_state, expected_output",
+  "test_vector_generator_python": ""
+}

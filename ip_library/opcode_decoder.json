@@ -1,0 +1,60 @@
+{
+  "module_name": "riscv_opcode_decoder",
+  "description": "Purely combinational opcode decoder for RISC-V single-cycle CPU that decodes 7-bit opcode field to determine instruction format and generate coarse control signals for R-type, I-type (ALU/load/JALR), S-type, B-type, U-type (LUI), and J-type (JAL) instructions.",
+  "is_sequential": false,
+  "parameters": [],
+  "inputs": [
+    {
+      "name": "opcode",
+      "width": 7
+    }
+  ],
+  "outputs": [
+    {
+      "name": "is_r_type",
+      "width": 1
+    },
+    {
+      "name": "is_i_type_alu",
+      "width": 1
+    },
+    {
+      "name": "is_i_type_load",
+      "width": 1
+    },
+    {
+      "name": "is_s_type",
+      "width": 1
+    },
+    {
+      "name": "is_b_type",
+      "width": 1
+    },
+    {
+      "name": "is_u_type_lui",
+      "width": 1
+    },
+    {
+      "name": "is_j_type_jal",
+      "width": 1
+    },
+    {
+      "name": "is_i_type_jalr",
+      "width": 1
+    }
+  ],
+  "dse_strategies": [
+    "Strategy 1: Parallel comparator approach using eight independent 7-bit equality comparators for each opcode pattern, optimized for minimum latency at the cost of area (8 comparators)",
+    "Strategy 2: Binary decision tree decoder using cascaded if-else or case statements to minimize logic depth by checking most frequent opcodes first, balancing area and delay",
+    "Strategy 3: ROM-based lookup table using opcode as address index into 128-entry table, trading off area for regular structure and potential power optimization through address decoding"
+  ],
+  "internal_probes": [
+    "probe_opcode_match_r",
+    "probe_opcode_match_i_alu",
+    "probe_opcode_match_load",
+    "probe_opcode_match_store",
+    "probe_opcode_valid"
+  ],
+  "golden_model_python": "def generate_test_vectors():\n    import random\n    test_vectors = []\n    \n    # Hardcode edge cases for all valid RISC-V opcodes\n    test_vectors.append({'opcode': 0b0110011})  # R-type\n    test_vectors.append({'opcode': 0b0010011})  # I-type ALU\n    test_vectors.append({'opcode': 0b0000011})  # I-type load\n    test_vectors.append({'opcode': 0b0100011})  # S-type\n    test_vectors.append({'opcode': 0b1100011})  # B-type\n    test_vectors.append({'opcode': 0b0110111})  # U-type LUI\n    test_vectors.append({'opcode': 0b1101111})  # J-type JAL\n    test_vectors.append({'opcode': 0b1100111})  # I-type JALR\n    test_vectors.append({'opcode': 0b0000000})  # Invalid opcode\n    test_vectors.append({'opcode': 0b1111111})  # Invalid opcode\n    test_vectors.append({'opcode': 0b0101010})  # Invalid opcode\n    test_vectors.append({'opcode': 0b1010101})  # Invalid opcode\n    \n    # Generate random test vectors\n    for _ in range(88):\n        test_vectors.append({'opcode': random.randint(0, 127)})\n    \n    return test_vectors\n\ndef golden_model(model_state, inputs):\n    expected_output = {}\n    \n    opcode = inputs.get('opcode', 0) & 0x7F\n    \n    # Initialize all outputs to 0\n    expected_output['is_r_type'] = 0\n    expected_output['is_i_type_alu'] = 0\n    expected_output['is_i_type_load'] = 0\n    expected_output['is_s_type'] = 0\n    expected_output['is_b_type'] = 0\n    expected_output['is_u_type_lui'] = 0\n    expected_output['is_j_type_jal'] = 0\n    expected_output['is_i_type_jalr'] = 0\n    \n    # Decode opcode\n    if opcode == 0b0110011:  # 0x33\n        expected_output['is_r_type'] = 1\n    elif opcode == 0b0010011:  # 0x13\n        expected_output['is_i_type_alu'] = 1\n    elif opcode == 0b0000011:  # 0x03\n        expected_output['is_i_type_load'] = 1\n    elif opcode == 0b0100011:  # 0x23\n        expected_output['is_s_type'] = 1\n    elif opcode == 0b1100011:  # 0x63\n        expected_output['is_b_type'] = 1\n    elif opcode == 0b0110111:  # 0x37\n        expected_output['is_u_type_lui'] = 1\n    elif opcode == 0b1101111:  # 0x6F\n        expected_output['is_j_type_jal'] = 1\n    elif opcode == 0b1100111:  # 0x67\n        expected_output['is_i_type_jalr'] = 1\n    \n    return model_state, expected_output",
+  "test_vector_generator_python": ""
+}

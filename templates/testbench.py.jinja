@@ -102,13 +102,20 @@ async def {{ module_name }}_crv_test(dut):
             assert hardware_result == expected_output, \
                 f"CRV FAIL on iteration {i}: Inputs={input_dict} | Hardware Output={hardware_result} | Golden Model Expected={expected_output}"
         except AssertionError as exc:
-            failure_payload = {
+            failure_dump = {
                 "inputs": input_dict,
-                "expected": expected_output,
-                "actual_hardware_output": hardware_result,
+                "outputs": hardware_result,
             }
+            {% for probe in (inputs + outputs) %}
+            {% if probe.name.startswith('probe_') %}
+            try:
+                failure_dump["{{ probe.name }}"] = int(dut.{{ probe.name }}.value)
+            except ValueError:
+                failure_dump["{{ probe.name }}"] = 0
+            {% endif %}
+            {% endfor %}
             failure_path = Path("failure_context.json")
-            failure_path.write_text(json.dumps(failure_payload, indent=2), encoding="utf-8")
+            failure_path.write_text(json.dumps(failure_dump, indent=2), encoding="utf-8")
             raise
         {% if is_sequential %}
         await FallingEdge(dut.clk)

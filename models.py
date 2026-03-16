@@ -1,4 +1,4 @@
-from typing import List
+from typing import List, Literal
 
 from pydantic import BaseModel, Field
 
@@ -21,6 +21,10 @@ class HardwareSpec(BaseModel):
         ..., min_length=3, max_length=3,
         description="List exactly 3 distinct microarchitecture implementation strategies."
     )
+    internal_probes: list[str] = Field(
+        default_factory=list,
+        description="Optional list of internal signals prefixed with probe_ for debugging."
+    )
 
 
 class SystemTask(BaseModel):
@@ -29,6 +33,10 @@ class SystemTask(BaseModel):
     requires_dummy_oracle: bool = Field(
         False,
         description="If True, asks the verification oracle to return a pass-through/dummy model instead of a cycle-accurate simulation."
+    )
+    component_class: Literal["FSM", "DATAPATH", "MEMORY", "INTERCONNECT", "TOP_LEVEL"] = Field(
+        ...,
+        description="Component Class used to route verification templates and tooling."
     )
 
 
