@@ -1,50 +1,57 @@
-import fitz  # PyMuPDF
-import re
-from pathlib import Path
+from langchain_community.document_loaders import UnstructuredFileLoader
+from langchain_text_splitters import MarkdownHeaderTextSplitter
 from rag_agent import HardwareRAG
-
-def extract_text_from_pdf(pdf_path: str) -> str:
-    """Extracts raw text from a PDF document."""
-    doc = fitz.open(pdf_path)
-    text = ""
-    for page in doc:
-        text += page.get_text()
-    return text
-
-def intelligent_chunker(text: str) -> list[str]:
-    """Splits text using a more robust recursive character splitter."""
-    from langchain_text_splitters import RecursiveCharacterTextSplitter
-    
-    # This splitter tries to split by paragraphs, then sentences, then words.
-    text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1000,
-        chunk_overlap=150,
-        length_function=len,
-        is_separator_regex=False,
-    )
-    
-    return text_splitter.split_text(text)
+import os
 
 if __name__ == "__main__":
-    PDF_FILE = "riscv-spec.pdf" # Make sure you rename your PDF to this
+    PDF_FILE = "riscv-spec.pdf" # Make sure your PDF is named this
+
+    # 1. Load the PDF using Unstructured, which converts it to clean Markdown
+    print(f"Loading and parsing {PDF_FILE} into structured Markdown...")
+    loader = UnstructuredFileLoader(PDF_FILE, mode="elements")
+    documents = loader.load()
     
-    print(f"Reading text from {PDF_FILE}...")
-    raw_text = extract_text_from_pdf(PDF_FILE)
+    # Concatenate all elements into a single markdown string
+    markdown_content = "\n\n".join([doc.page_content for doc in documents])
+
+    # 2. Use a Markdown-aware splitter to chunk by headers
+    # This keeps sections and tables semantically intact.
+    headers_to_split_on = [
+        ("#", "Header 1"),
+        ("##", "Header 2"),
+        ("###", "Header 3"),
+    ]
+    markdown_splitter = MarkdownHeaderTextSplitter(headers_to_split_on=headers_to_split_on)
+    text_chunks = markdown_splitter.split_text(markdown_content)
+
+    # Convert Langchain's Document objects to a single string, respecting the structure
+    clean_markdown_text = "\n\n".join([chunk.page_content for chunk in text_chunks])
+
+    # 3. Save the clean Markdown to a temporary file
+    temp_markdown_file = "temp_riscv_spec.md"
+    with open(temp_markdown_file, "w") as f:
+        f.write(clean_markdown_text)
     
-    print("Chunking document into semantic sections...")
-    text_chunks = intelligent_chunker(raw_text)
-    
-    print(f"Found {len(text_chunks)} chunks. Ingesting into ChromaDB...")
+    print(f"Saved cleaned Markdown to {temp_markdown_file}. Now ingesting...")
+
+    # 4. Ingest the CLEAN file using your existing, proven RAG agent method
     rag = HardwareRAG(collections=["hardware_specs"])
     
-    # We will just use the PDF filename as the document ID
-    doc_id = Path(PDF_FILE).name
+    # First, clear the old, broken chunks from the database
+    # (We need to find the right method for this in your class. For now, let's assume direct access)
+    try:
+        # Get all documents with the old source to delete them
+        old_docs = rag._collection_for("hardware_specs").get(where={"source": "riscv-spec.pdf"})
+        if old_docs['ids']:
+            rag._collection_for("hardware_specs").delete(ids=old_docs['ids'])
+            print("Cleared old, broken chunks from the database.")
+    except Exception as e:
+        print(f"Could not clear old chunks (this might be ok on first run): {e}")
+
+    # Now, ingest the clean file
+    rag.ingest_document(temp_markdown_file, collection_name="hardware_specs")
     
-    # Ingest the entire text as a single document with multiple chunks
-    rag.ingest_text(
-        text=raw_text, 
-        doc_id=doc_id,
-        collection_name="hardware_specs"
-    )
-    
-    print(f"✅ Ingestion complete. {rag._collection_for('hardware_specs').count()} total documents now in collection.")
+    # Optional: clean up the temporary file
+    os.remove(temp_markdown_file)
+
+    print(f"✅ Ingestion complete. {rag._collection_for('hardware_specs').count()} documents stored in 'hardware_specs' collection.")
