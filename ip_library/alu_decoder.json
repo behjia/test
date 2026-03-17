@@ -1,0 +1,40 @@
+{
+  "module_name": "alu_decoder",
+  "description": "Decodes ALU operation signals from alu_op (2-bit) and instruction fields (funct3, funct7) to generate 3-bit alu_control for 32-bit RISC-V ALU. Maps alu_op_00 to ADD, alu_op_01 to SUB, and alu_op_10 to R-type operations (ADD/SUB/AND/OR) based on funct3 and funct7 fields.",
+  "is_sequential": false,
+  "parameters": [],
+  "inputs": [
+    {
+      "name": "alu_op",
+      "width": 2
+    },
+    {
+      "name": "funct3",
+      "width": 3
+    },
+    {
+      "name": "funct7",
+      "width": 7
+    }
+  ],
+  "outputs": [
+    {
+      "name": "alu_control",
+      "width": 3
+    }
+  ],
+  "dse_strategies": [
+    "Fully combinational truth-table decoder using case statements on alu_op with nested funct3/funct7 decoding for minimal latency and area",
+    "Hierarchical decoder with separate funct3 and funct7 decoders feeding a multiplexer tree, enabling independent optimization and reuse",
+    "Encoded lookup table (LUT) with alu_op as primary index and funct3/funct7 concatenation as secondary index, trading logic depth for reduced gate count"
+  ],
+  "internal_probes": [
+    "probe_alu_op_00",
+    "probe_alu_op_01",
+    "probe_alu_op_10",
+    "probe_funct3_match",
+    "probe_funct7_match"
+  ],
+  "component_class": "FSM",
+  "golden_model_python": "def generate_test_vectors():\n    return [{'dummy': 0}]\ndef golden_model(state, inputs):\n    return state, {}\n"
+}

@@ -4,13 +4,13 @@ import re
 import shutil
 from enum import Enum
 from pathlib import Path
-import ast
+import litellm
 import litellm
 from litellm import completion
 import instructor
 from dotenv import load_dotenv
 from pydantic import ValidationError
-from models import ArchitecturePlan, HardwareSpec
+from models import ArchitecturePlan, HardwareSpec, OracleData
 from rag_agent import HybridRAG, HardwareRAG
 from ip_manager import IPManager
 
@@ -545,17 +545,9 @@ class EDA_LLM_Client:
         user_request: str,
         module_name: str | None = None,
         component_class: str | None = None,
-    ) -> dict:
-        """Generate the Python golden model/test vector pair in a second pass."""
-        print("[SYSTEM] Generating verification oracle (golden model + test vectors)...")
-        example_block = ""
-        example_text = self._retrieve_testbench_example(module_name, component_class)
-        if example_text:
-            example_block = (
-                "\n\nCRITICAL EXAMPLE: Here is a verified, perfect Python Oracle for a similar module. "
-                "You MUST mimic this exact structure and logic flow:\n"
-                f"{example_text}\n"
-            )
+    ) -> str:
+        """Generate the OracleData truth table for verification purposes."""
+        print("[SYSTEM] Generating verification oracle (truth-table JSON)...")
 
         hybrid_context = self._retrieve_hybrid_context(user_request)
         hybrid_section = (
@@ -565,38 +557,12 @@ class EDA_LLM_Client:
         )
 
         base_prompt = (
-            "You are a Senior Python QA Engineer. You have previously defined the RTL "
-            "skeleton described below. Using that skeleton plus the original user "
-            f"request: \"{user_request}\", write TWO extremely concise Python functions: "
-            "`def golden_model(state, inputs)` and `def generate_test_vectors()`.\n"
-            "Ensure:\n"
-            "1. CHAIN OF THOUGHT: Use standard # comments for your truth table to prevent AST parsing errors with string literals.\n"
-            "2. All undefined opcodes produce outputs with every field set to 0.\n"
-            "3. `generate_test_vectors()` returns a list of dictionaries describing sequential cycles when `is_sequential` is true or combinational inputs otherwise.\n"
-            "4. The `golden_model(state, inputs)` MUST return exactly a tuple of TWO dictionaries: (updated_state, expected_outputs_dict).\n"
-            "5. SAFE FALLBACKS: The golden_model MUST end with `return model_state, expected_output` covering any undefined inputs, and `generate_test_vectors()` MUST end with `return test_vectors` so a list is always returned even if your logic hits an unknown path.\n"
-            "6. TOKEN LIMIT AVOIDANCE: When writing `generate_test_vectors()`, DO NOT hardcode a massive list of 100 dictionaries. Hardcode 10 to 15 core edge-cases (e.g., valid RISC-V opcodes), and then use a Python for loop with the `random` module to append the remaining vectors. This prevents massive string truncation and bracket errors.\n"
-            "7. Keep the code terse, avoid extra comments beyond the required roadmap, and focus on bitwise/lookup logic.\n"
-            "8. CRITICAL STRUCTURE: You must use the exact skeleton below and return the required values. Do not wrap the functions in a class.\n"
-            "```python\n"
-            "def generate_test_vectors():\n"
-            "    test_vectors = []\n"
-            "    # Hardcode 10-15 edge cases here\n"
-            "    # Use a for loop to append random combinations up to 100\n"
-            "    return test_vectors\n\n"
-            "def golden_model(model_state, inputs):\n"
-            "    expected_output = {}\n"
-            "    # Your logic here. Default all outputs to 0 if the opcode is unknown!\n"
-            "    return model_state, expected_output\n"
-            "```\n"
-            "You MUST use exactly those function names, and you MUST return `test_vectors` and `model_state, expected_output`.\n"
-            "9. CRITICAL RULE: The `generate_test_vectors()` function MUST return a valid Python list of dictionaries. It absolutely CANNOT return None.\n"
-            "10. Include a fallback `return []` at the end so a list is always produced even if your logic fails.\n"
-            "IMPORTANT: DO NOT write `def generate_test_vectors():` or `def golden_model(model_state, inputs):`. "
-            "DO NOT write any import statements. Output ONLY the Python logic that goes INSIDE these functions. "
-            "Separate the two logic blocks using the special marker `===GOLDEN_MODEL===`.\n"
+            "You are a Verification Data Engineer. Given this HardwareSpec, output the OracleData JSON truth table "
+            "mapping the core operational states (e.g., specific RISC-V opcodes) to their expected outputs. DO NOT write Python code.\n"
+            "Ensure every truth_table entry has `inputs` and `outputs` maps keyed by signal names with concrete ints.\n"
+            "Return only the OracleData object and nothing else.\n"
+            "BIT-SLICING HINT: When you're dealing with ALU decoder logic, treat funct7 as a 7-bit field—the distinguishing bit for SUB is bit 5 (i.e., funct7 == 32 or binary 0100000). Do NOT assume funct7 == 1 for subtraction; check for 32 to differentiate SUB from ADD.\n"
             f"{hybrid_section}"
-            "CRITICAL REASONING RULE: Do not guess the signal dependencies. Trace the paths provided in the RELATIONAL LOGIC MAP (GRAPH) to determine exactly which inputs drive which outputs.\n"
             "Hardware Skeleton (JSON):\n"
             f"{json.dumps(spec_dict, indent=2)}\n"
         )
@@ -605,60 +571,38 @@ class EDA_LLM_Client:
         ip_context = self._render_ip_library_headers()
         rag_content = self._retrieve_rag_context(spec_dict)
         system_context = self._build_system_context(spec_dict, rag_content, ip_context)
+
         for attempt in range(3):
-            final_prompt = base_prompt + example_block + prompt_suffix
-            raw_text = self.moe.route_task(
-                prompt=final_prompt,
-                tier=ExpertTier.TIER_GRUNT,
-                max_tokens=4096,
-                temperature=0.1,
-                system_context=system_context,
-            )
-            clean_python = self.extract_python_code(raw_text)
-            parts = clean_python.split("===GOLDEN_MODEL===")
-            if len(parts) < 2:
-                print("[SYSTEM] Oracle output missing ===GOLDEN_MODEL=== separator. Retrying...")
-                prompt_suffix = (
-                    "\nCRITICAL: Please separate the test vectors and golden model logic with ===GOLDEN_MODEL===.\n"
-                )
-                continue
-            test_body = parts[0].strip()
-            golden_body = parts[1].strip()
-            normalized_test = self._normalize_function_body(
-                test_body,
-                "    test_vectors = []\n    return test_vectors",
-            )
-            normalized_golden = self._normalize_function_body(
-                golden_body,
-                "    expected_output = {}\n    return model_state, expected_output",
-            )
+            final_prompt = base_prompt + prompt_suffix
+            system_messages: list[dict] = []
+            if system_context:
+                system_messages.append({"role": "system", "content": system_context})
+            system_messages.append({"role": "user", "content": final_prompt})
+
             try:
-                ast.parse(
-                    "def generate_test_vectors():\n"
-                    + normalized_test
-                    + "\n\n"
-                    + "def golden_model(model_state, inputs):\n"
-                    + normalized_golden
+                oracle_data: OracleData = self.instructor_client.chat.completions.create(
+                    model=ExpertTier.TIER_GRUNT.primary,
+                    max_tokens=4096,
+                    temperature=0.1,
+                    messages=system_messages,
+                    response_model=OracleData,
                 )
-            except SyntaxError as exc:
-                print(f"[SYSTEM] Oracle Python syntax error: {exc}. Retrying...")
+                return oracle_data.model_dump_json()
+
+            except ValidationError as exc:
+                print(f"[SYSTEM] Oracle JSON validation failed: {exc}. Retrying...")
                 prompt_suffix = (
-                    f"\nCRITICAL: Your Python logic failed ast.parse() with SyntaxError: {exc}. "
-                    "Fix your indentation or stray keywords.\n"
+                    "\nCRITICAL: Return a clean OracleData JSON structure with a truth_table mapping "
+                    "states to objects like {\"inputs\": {\"opcode\": 51}, \"outputs\": {\"result\": 0}}.\n"
                 )
                 continue
             except Exception as exc:
-                print(f"[SYSTEM] Oracle Python error: {exc}. Retrying...")
+                print(f"[SYSTEM] Oracle generation error: {exc}. Retrying...")
                 prompt_suffix = (
-                    f"\nCRITICAL: Unexpected issue when validating logic: {type(exc).__name__}: {exc}.\n"
+                    f"\nCRITICAL: Unexpected issue when generating the oracle: {type(exc).__name__}: {exc}.\n"
                 )
                 continue
-            return {
-                "test_vector_body": normalized_test,
-                "golden_model_body": normalized_golden,
-            }
-        raise ValueError("Unable to generate a syntax-valid Python oracle after 3 attempts.")
-        raise ValueError("Unable to generate a syntax-valid Python oracle after 3 attempts.")
+        raise ValueError("Unable to generate a valid OracleData JSON after 3 attempts.")
 
     # ------------------------------------------------------------------
     # Single-shot RTL generation
@@ -670,9 +614,11 @@ class EDA_LLM_Client:
             "FSM": (
                 "Use typedef enum for state encoding. Use always_ff @(posedge clk) for state updates. "
                 "Separate next-state logic into a combinational block (always_comb)."
+                "CRITICAL ANTI-LATCH RULE: At the very top of your always_comb block, you MUST assign default values (e.g., 0) to EVERY single output signal before writing any if or case statements. This mathematically guarantees no latches are inferred."
             ),
             "DATAPATH": (
                 "Use always_comb for all logic. Prioritize standard Verilog operators. Do not use sequential logic."
+                "CRITICAL ANTI-LATCH RULE: At the very top of your always_comb block, you MUST assign default values (e.g., 0) to EVERY single output signal before writing any if or case statements. This mathematically guarantees no latches are inferred."
             ),
             "MEMORY": (
                 "Use a standard multi-dimensional array reg [width-1:0] mem [0:depth-1]. Clearly distinguish "
@@ -693,9 +639,7 @@ class EDA_LLM_Client:
             "3. Ensure proper reset behavior if an rst or rst_n port is specified."
             if is_seq else
             "1. This design must be PURELY COMBINATIONAL. Do NOT use clk, rst, or any sequential logic.\n"
-            "2. Use always_comb with logic type variables, or pure assign statements.\n"
-            "3. Include an 'initial begin #1; end' block for Verilator VM_TIMING compatibility.\n"
-            "4. CRITICAL SYNTHESIS RULE: You MUST wrap any timing constructs (like #1) in an ifndef block so synthesis tools ignore them."
+            "2. Use always_comb with logic type variables, or pure assign statements."
         )
 
         components = spec_dict.get("component_class", "")
@@ -741,11 +685,12 @@ class EDA_LLM_Client:
             "5. DO NOT write the module declaration, port list, or endmodule. I already have the structural wrapper.\n"
             "6. You must ONLY output the internal logic (assign statements, always_comb, or always_ff blocks).\n"
             "7. Output ONLY the raw internal logic block. Do not explain anything.\n\n"
+            "8. CRITICAL: DO NOT output any testbenches, simulation code, or secondary modules. No 'initial begin' blocks. Output ONLY the logic for the requested module.\n\n"
             "CRITICAL CODING STANDARDS:\n"
             "- DO NOT use massive concatenated binary literals (e.g., 13'b100...). Assign signals individually, or use cleanly formatted localparam/state definitions for clarity.\n"
             "- CHAIN OF THOUGHT: For complex logic like decoders or control units, write a brief Truth Table/Logic Map comment immediately before the always_comb block.\n"
             "- Always include a default: case that safely sets all outputs to 0.\n"
-        )
+            )
 
         prompt = (
             "You are a master ASIC RTL designer. Implement this module based EXACTLY on the JSON specification below.\n"
@@ -772,14 +717,35 @@ class EDA_LLM_Client:
             clean_logic = clean_logic.replace("`systemverilog\n", "")
             clean_logic = clean_logic.replace("`verilog\n", "")
             clean_logic = clean_logic.replace("`systemverilog", "")
-
-            return clean_logic
+            return self._sanitize_rtl(clean_logic)
         except Exception as e:
             print(f"❌ ERROR generating RTL: {e}")
             # Return a safe Verilog comment instead of a hardcoded module.
             # This ensures the Jinja2 wrapper renders an empty module,
             # which will safely fail the testbench and trigger the Critic Agent.
             return f"// FATAL ERROR during LLM generation: {e}\n// The Critic Agent will attempt to regenerate this."
+    
+    def _sanitize_rtl(self, code: str) -> str:
+        """Strip any hallucinatory wrappers or timing constructs from RTL."""
+        # 1. Strip markdown tags
+        code = code.replace("`systemverilog\n", "").replace("`verilog\n", "").replace("`systemverilog", "")
+        # 2. Remove any simulation/timing constructs
+        code = re.sub(r'`ifndef\s+SYNTHESIS[\s\S]*?`endif', '', code)
+        code = re.sub(r'\binitial\b[\s\S]*?\bend\b', '', code)
+        # 3. Remove module wrappers if the model hallucinated them
+        code = re.sub(
+            r'^\s*module\s+[a-zA-Z0-9_]+\s*\(.*?\);',
+            '',
+            code,
+            flags=re.DOTALL | re.MULTILINE,
+        )
+        code = re.sub(
+            r'^\s*endmodule\b.*$',
+            '',
+            code,
+            flags=re.MULTILINE,
+        )
+        return code.strip()
     
     # ------------------------------------------------------------------
     # Self-healing fix (unchanged — free-form text output)
@@ -789,10 +755,11 @@ class EDA_LLM_Client:
         broken_code: str,
         error_log: str,
         testbench_code: str = "",
-        is_sequential: bool = False,
         error_type: str = "LOGIC",
+        is_sequential: bool = False,
         retry_count: int = 0,
-    ) -> str:
+        workspace_dir: str | None = None,
+    ) -> str | dict:
         """Takes broken SystemVerilog code, its simulator error log, and
         optionally the testbench, then returns a corrected version.
 
@@ -813,12 +780,14 @@ class EDA_LLM_Client:
             Simulator / linter error output (Verilator, iverilog, etc.).
         testbench_code:
             Optional testbench source to give the model constraint context.
-        is_sequential:
-            When True, enforce sequential RTL rules; otherwise combinational.
         error_type:
             Failure classification reported by the verification pipeline ("SYNTAX", "LOGIC", etc.).
+        is_sequential:
+            When True, enforce sequential RTL rules; otherwise combinational.
         retry_count:
             Number of previous failed fix attempts — controls tier escalation.
+        workspace_dir:
+            Optional workspace directory containing the failing artifacts for diagnostics.
         """
         if error_type.upper() == "SYNTAX":
             tier = ExpertTier.TIER_GRUNT
@@ -860,7 +829,7 @@ class EDA_LLM_Client:
             "   `ifndef SYNTHESIS\n"
             "   initial begin #1; end\n"
             "   `endif\n"
-            "8. You MUST wrap the corrected RTL in a ```systemverilog ... ``` block (explanations may precede it)."
+            "8. CRITICAL: DO NOT output any testbenches, simulation code, or $dumpfile macros. You are strictly forbidden from writing initial begin blocks. Output ONLY the combinational or sequential hardware logic."
         )
 
         prompt = (
@@ -895,17 +864,17 @@ class EDA_LLM_Client:
             )
             if not match:
                 print("    [CRITIC] Warning: no Verilog code block detected; returning broken code.")
-                return broken_code
+                return self._sanitize_rtl(broken_code)
             fixed_code = match.group(1).strip()
             # SAFETY SCRUBBER: Remove hallucinated backtick macros
             fixed_code = fixed_code.replace("`systemverilog\n", "")
             fixed_code = fixed_code.replace("`verilog\n", "")
             
             print("✅ SUCCESS: Corrected code generated.")
-            return fixed_code
+            return self._sanitize_rtl(fixed_code)
         except Exception as e:
             print(f"❌ ERROR: Auto-fix failed: {e}")
-            return broken_code
+            return self._sanitize_rtl(broken_code)
 # =========================================================================
 # Workspace scaffolding (unchanged)
 # =========================================================================

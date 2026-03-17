@@ -1,0 +1,22 @@
+{
+  "main_decoder_rules": {
+    "add":  {"opcode": "0110011", "reg_write": 1, "imm_sel": "X", "alu_src": 0, "alu_op": "10", "mem_write": 0, "mem_read": 0, "branch": 0, "jump": 0},
+    "addi": {"opcode": "0010011", "reg_write": 1, "imm_sel": "I", "alu_src": 1, "alu_op": "00", "mem_write": 0, "mem_read": 0, "branch": 0, "jump": 0},
+    "lw":   {"opcode": "0000011", "reg_write": 1, "imm_sel": "I", "alu_src": 1, "alu_op": "00", "mem_write": 0, "mem_read": 1, "branch": 0, "jump": 0},
+    "sw":   {"opcode": "0100011", "reg_write": 0, "imm_sel": "S", "alu_src": 1, "alu_op": "00", "mem_write": 1, "mem_read": 0, "branch": 0, "jump": 0},
+    "beq":  {"opcode": "1100011", "reg_write": 0, "imm_sel": "B", "alu_src": 0, "alu_op": "01", "mem_write": 0, "mem_read": 0, "branch": 1, "jump": 0},
+    "jalr": {"opcode": "1100111", "reg_write": 1, "imm_sel": "I", "alu_src": 1, "alu_op": "00", "mem_write": 0, "mem_read": 0, "branch": 0, "jump": 1}
+  },
+  "alu_decoder_rules": {
+    "Description": "Maps alu_op from Main Decoder + funct3 + funct7 to specific ALU control signals.",
+    "alu_op_00": {"trigger": "Load/Store", "alu_control": "ADD (000)"},
+    "alu_op_01": {"trigger": "Branch", "alu_control": "SUB (001)"},
+    "alu_op_10": {
+      "trigger": "R-Type or I-Type",
+      "funct3_000": {"funct7_0": "ADD (000)", "funct7_32": "SUB (001)"},
+      "funct3_111": {"funct7_X": "AND (010)"},
+      "funct3_110": {"funct7_X": "OR  (011)"}
+    }
+  }
+  }
+}

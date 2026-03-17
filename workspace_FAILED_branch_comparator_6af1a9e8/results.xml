@@ -1,0 +1,8 @@
+<testsuites name="results">
+  <testsuite name="all" package="all">
+    <property name="random_seed" value="1773729727" />
+    <testcase name="branch_comparator_math_equivalence" classname="test_design" file="/workspaces/test/workspace/test_design.py" lineno="19" time="0.0008363723754882812" sim_time_ns="1.0" ratio_time="1195.6396807297606">
+      <failure error_type="AssertionError" error_msg="Math equivalence failure: Inputs={'operand_a': 1802934719, 'operand_b': 2511679360, 'branch_type': 3} | HW={'branch_taken': 0, 'eq_flag': 0, 'lt_signed': 0, 'lt_unsigned': 1} | GOLDEN={}&#10;assert {'branch_taken': 0, 'eq_flag': 0, 'lt_signed': 0, 'lt_unsigned': 1} == {}" />
+    </testcase>
+  </testsuite>
+</testsuites>

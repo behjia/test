@@ -80,6 +80,7 @@ def golden_model(model_state, inputs):
 
     # 1. RENDER TESTBENCH
     tb_template_name = _testbench_template_name(component_class)
+    print(f"[DEBUG] Using testbench template: {tb_template_name} for class {component_class}")
     tb_template = env.get_template(tb_template_name)
     tb_rendered = tb_template.render(
         module_name=mod_name,
@@ -154,132 +155,68 @@ def _build_diagnostic_context(tags: List[str]) -> str:
             contexts.append(f"--- Diagnostic for {tag} ---\n{ctx.strip()}")
     return "\n\n".join(contexts)
 
-def run_verification(workspace_dir: str, fallback_module_name: str,
-                     spec_dict: dict | None = None) -> dict:
-    """Run Verilator/cocotb verification inside *workspace_dir*.
-    Parameters
-    ----------
-    workspace_dir : str
-        Path to the worker's run directory (e.g. "workspace/run_0").
-    fallback_module_name : str
-        Module name to use if auto-detection from design.sv fails.
-    spec_dict : dict, optional
-        If provided, ``generate_testbench`` is called to render a fresh
-        test file from the Jinja2 template before running ``make``.
-    """
-    target_path = Path(workspace_dir)
-    # ----- FAST SYNTAX LINT CHECK -----
-    syntax_lint_cmd = [
-        "verilator",
-        "--lint-only",
-        "-Wall",
-        "-Wno-DECLFILENAME",
-        "design.sv",
-    ]
-    lint_syntax = subprocess.run(
-        syntax_lint_cmd,
-        cwd=target_path,
-        capture_output=True,
-        text=True,
-    )
-    if lint_syntax.returncode != 0:
-        return {
-            "workspace": workspace_dir,
-            "status": "FAIL",
-            "execution_time": 0.0,
-            "log": "[SYNTAX LINT ERROR]\n" + lint_syntax.stderr,
-            "vcd_snapshot": None,
-            "error_tags": [],
-            "diagnostic_context": None,
-            "error_type": "SYNTAX",
-        }
-    verilog_file = target_path / "design.sv"
-    actual_name = fallback_module_name
 
-    # ----- BUILD HARDWARE WRAPPER AROUND INTERNAL LOGIC -----
-    if spec_dict is not None and verilog_file.exists():
-        internal_logic = verilog_file.read_text(encoding="utf-8")
-        actual_name = spec_dict.get("module_name", fallback_module_name)
-        env = Environment(loader=FileSystemLoader(str(_TEMPLATES_DIR)))
-        wrapper_template = env.get_template("hardware_wrapper.sv.jinja")
-        wrapped = wrapper_template.render(
+def _ensure_trailing_double_newline(design_path: Path) -> None:
+    if not design_path.exists():
+        return
+    content = design_path.read_text(encoding="utf-8")
+    if not content.endswith("\n\n"):
+        content = content.rstrip("\n") + "\n\n"
+        design_path.write_text(content, encoding="utf-8")
+
+def run_verification(workspace_dir: str, fallback_module_name: str, spec_dict: dict | None = None) -> dict:
+    target_path = Path(workspace_dir)
+    design_file = target_path / "design.sv"
+    actual_name = spec_dict.get("module_name", fallback_module_name) if spec_dict else fallback_module_name
+
+    # ---------------------------------------------------------
+    # 1. CLEAN AND WRAP THE RAW LOGIC (ONCE!)
+    # ---------------------------------------------------------
+    if design_file.exists() and spec_dict:
+        raw_logic = design_file.read_text(encoding="utf-8")
+        
+        # Scrubber: extract internal logic if already wrapped (from a Critic retry)
+        if "// --- AI GENERATED INTERNAL LOGIC ---" in raw_logic:
+            parts = raw_logic.split("// --- AI GENERATED INTERNAL LOGIC ---")
+            if len(parts) > 1:
+                raw_logic = parts[1].split("// -----------------------------------")[0]
+        
+        raw_logic = raw_logic.replace("initial begin", "// KILLED INITIAL").replace("`ifndef SYNTHESIS", "// KILLED MACRO")
+
+        import jinja2
+        env = jinja2.Environment(loader=jinja2.FileSystemLoader("templates"))
+        template = env.get_template("hardware_wrapper.sv.jinja")
+        
+        wrapped_code = template.render(
             module_name=actual_name,
             inputs=spec_dict.get("inputs", []),
             outputs=spec_dict.get("outputs", []),
-            internal_logic=internal_logic,
+            internal_logic=raw_logic.strip()
         )
-        verilog_file.write_text(wrapped, encoding="utf-8")
-
-    # ----- AUTO-DETECT MODULE NAME VIA REGEX -----
-    if verilog_file.exists():
-        with open(verilog_file, "r", encoding="utf-8") as f:
-            verilog_content = f.read()
-            match = re.search(r"module\s+([a-zA-Z0-9_]+)", verilog_content)
-            if match:
-                actual_name = match.group(1)
-
-        # ----- VCD INJECTION HACK: Force Verilator to dump waves -----
-        # We append a non-synthesizable block to the end of the module
-        # so Verilator physically writes the dump.vcd file for the Slicer.
-        if "dump.vcd" not in verilog_content:
-            # Find the last 'endmodule'
-            last_endmodule_idx = verilog_content.rfind("endmodule")
-            if last_endmodule_idx != -1:
-                vcd_injection = f"""
-    `ifndef SYNTHESIS
-    initial begin
-        $dumpfile("sim_build/dump.vcd");
-        $dumpvars(0, {actual_name});
-    end
-    `endif
+        
+        # VCD Hack: Inject wave dumping safely before the endmodule
+        vcd_injection = f"""
+`ifndef SYNTHESIS
+initial begin
+    $dumpfile("sim_build/dump.vcd");
+    $dumpvars(0, {actual_name});
+end
+`endif
 """
-                # Insert the injection right before 'endmodule'
-                new_verilog = verilog_content[:last_endmodule_idx] + vcd_injection + verilog_content[last_endmodule_idx:]
-                
-                with open(verilog_file, "w", encoding="utf-8") as f:
-                    f.write(new_verilog)
-            else:
-                print(f"⚠️ [VCD INJECTION FAILED] Could not find 'endmodule' in {verilog_file}")
+        wrapped_code = wrapped_code.replace("endmodule", vcd_injection + "\nendmodule")
+        design_file.write_text(wrapped_code, encoding="utf-8")
 
-    # ----- GENERATE TESTBENCH FROM JINJA2 TEMPLATE -----
-    if spec_dict is not None:
-        # Ensure the spec knows the real module name
-        spec_dict.setdefault("module_name", actual_name)
-        generate_templates(spec_dict, target_path)
-    else:
-        # Legacy fallback: copy the old static test file if it exists
-        static_tb = _TEMPLATES_DIR / "test_alu.py"
-        if static_tb.exists():
-            shutil.copy(static_tb, target_path / "test_alu.py")
-    # Copy the Makefile template
-    shutil.copy(_TEMPLATES_DIR / "Makefile", target_path / "Makefile")
-    
-    # Bring shared verified IP into each workspace if available
-    ip_library = Path("ip_library")
-    if ip_library.exists():
-        print(f"[RAG] Copying {len(list(ip_library.glob('*.sv')))} IP files from {ip_library} into {target_path}")
-        for sv_file in ip_library.glob("*.sv"):
-            shutil.copy(sv_file, target_path / sv_file.name)
-    # ----- CLEAR VERILATOR BUILD CACHE -----
-    sim_build = target_path / "sim_build"
-    if sim_build.exists():
-        shutil.rmtree(sim_build)
-    # ----- PRE-FLIGHT LINT CHECK -----
-    lint_result = subprocess.run(
-        [
-            "verilator",
-            "--lint-only",
-            "-Wall",
-            "-Werror-LATCH",
-            "-Werror-MULTIDRIVEN",
-            "-Wno-DECLFILENAME",
-            "-sv",
-            "design.sv",
-        ],
-        cwd=target_path,
-        capture_output=True,
-        text=True,
-    )
+    # ---------------------------------------------------------
+    # 2. PRE-FLIGHT LINTER
+    # ---------------------------------------------------------
+    _ensure_trailing_double_newline(design_file)
+    lint_cmd = [
+        "verilator", "--lint-only", "-Wall", 
+        "-Werror-LATCH", "-Werror-MULTIDRIVEN", 
+        "-Wno-DECLFILENAME", "-Wno-UNUSEDSIGNAL", "-Wno-EOFNEWLINE", "-Wno-BADVLTPRAGMA",
+        "-DSYNTHESIS", "-sv", "design.sv"
+    ]
+    lint_result = subprocess.run(lint_cmd, cwd=target_path, capture_output=True, text=True)
     if lint_result.returncode != 0:
         return {
             "workspace": workspace_dir,
@@ -291,19 +228,50 @@ def run_verification(workspace_dir: str, fallback_module_name: str,
             "diagnostic_context": None,
             "error_type": "PHYSICAL",
         }
+
+    # ---------------------------------------------------------
+    # 3. SETUP TESTBENCH & IP LIBRARY
+    # ---------------------------------------------------------
+    if spec_dict is not None:
+        spec_dict.setdefault("module_name", actual_name)
+        generate_templates(spec_dict, target_path)
+    else:
+        static_tb = _TEMPLATES_DIR / "test_alu.py"
+        if static_tb.exists():
+            shutil.copy(static_tb, target_path / "test_alu.py")
+            
+    shutil.copy(_TEMPLATES_DIR / "Makefile", target_path / "Makefile")
+    
+    ip_library = Path("ip_library")
+    if ip_library.exists():
+        for sv_file in ip_library.glob("*.sv"):
+            shutil.copy(sv_file, target_path / sv_file.name)
+
+    # 4. RUN COCOTB SIMULATION
+    # ---------------------------------------------------------
+    sim_build = target_path / "sim_build"
+    if sim_build.exists():
+        shutil.rmtree(sim_build)
+        
     start_time = time.time()
-    # ----- RUN MAKE -----
+    
+    # Secure Verilog Sources using ABSOLUTE paths so Make can find them
+    ip_files = [str((target_path / f.name).resolve()) for f in target_path.glob("*.sv") if f.name != "design.sv"]
+    verilog_sources = f"{str((target_path / 'design.sv').resolve())}" + ((" " + " ".join(ip_files)) if ip_files else "")
+    
     result = subprocess.run(
-        ["make", f"TOPLEVEL={actual_name}"],
-        cwd=target_path,
-        capture_output=True,
-        text=True,
+        ["make", f"TOPLEVEL={actual_name}", f"VERILOG_SOURCES={verilog_sources}"],
+        cwd=target_path, capture_output=True, text=True
     )
+    
     execution_time = time.time() - start_time
+    
+    # ---------------------------------------------------------
+    # 5. LOG DISTILLATION
+    # ---------------------------------------------------------
     raw_log = result.stdout + result.stderr
     lines = raw_log.splitlines()
-
-    distilled_entries: list[str] = []
+    distilled_entries = []
     i = 0
     while i < len(lines):
         line = lines[i]
@@ -319,8 +287,7 @@ def run_verification(workspace_dir: str, fallback_module_name: str,
             distilled_entries.append(line)
         i += 1
 
-    # Prefer the AssertionError + Hardware Output / Golden Model view
-    assertion_snippet: list[str] = []
+    assertion_snippet = []
     for idx, line in enumerate(lines):
         if "AssertionError" in line:
             assertion_snippet.append(line)
@@ -337,28 +304,25 @@ def run_verification(workspace_dir: str, fallback_module_name: str,
         distilled_log = "\n".join(distilled_entries).strip()
         if not distilled_log:
             distilled_log = "\n".join(lines[-20:])
-        if len(distilled_log) > 2000:
-            distilled_log = distilled_log[:2000]
-        log_output = distilled_log
+        log_output = distilled_log[:2000]
     
-    # ----- DETERMINE STATUS -----
     status = (
         "PASS"
-        if "PASS=1" in log_output and result.returncode == 0
+        # Check the raw_log, not the truncated log_output!
+        if "PASS=1" in raw_log and result.returncode == 0
         else "FAIL"
     )
 
-    # ----- VCD TEMPORAL SLICER (WHITE-BOX DEBUGGING) -----
+    # ---------------------------------------------------------
+    # 6. VCD TEMPORAL SLICER & ERROR TAGS
+    # ---------------------------------------------------------
     vcd_data_for_test = None
     if status == "FAIL":
         timestamp_ns = None
-        
-        # 1. Try to find standard AssertionError format (e.g., "... at time 123 ns")
         time_match = re.search(r"at time (\d+(?:\.\d+)?)\s*ns", log_output)
         if time_match:
             timestamp_ns = float(time_match.group(1))
         else:
-            # 2. Fallback: Try to find Cocotb 2.0 log prefix format (e.g., "1.00ns WARNING")
             for line in log_output.splitlines():
                 if "CRV FAIL" in line or "AssertionError" in line:
                     prefix_match = re.search(r"^\s*(\d+(?:\.\d+)?)\s*ns", line)
@@ -366,36 +330,22 @@ def run_verification(workspace_dir: str, fallback_module_name: str,
                         timestamp_ns = float(prefix_match.group(1))
                         break
         
-        # 3. If we found the exact nanosecond of the crash, slice the VCD!
         if timestamp_ns is not None:
-            # Cocotb/Verilator usually dumps to sim_build/dump.vcd
             vcd_path = target_path / "sim_build" / "dump.vcd" 
-            
             if vcd_path.exists():
                 try:
                     from vcd_snapshot import snapshot_signal_states
                     import json
-                    
-                    # Extract the binary states of all signals at the crash timestamp
                     snapshot = snapshot_signal_states(vcd_path, timestamp_ns)
                     vcd_json_str = json.dumps(snapshot, indent=2)
-                    
-                    # Append the JSON to the log so the Critic Agent can read it
                     log_output += f"\n\n[...VCD SNAPSHOT AT {timestamp_ns}ns...]\n{vcd_json_str}"
                     vcd_data_for_test = snapshot
-                    
                 except Exception as e:
                     log_output += f"\n\n[VCD Slicer Failed: {e}]"
-            else:
-                log_output += f"\n\n[VCD Slicer Skipped: dump.vcd not found at {vcd_path}]"
 
-    # ----- DIAGNOSTIC CONTEXT FOR CRITIC AGENT -----
     error_tags = _extract_verilator_error_tags(log_output)
-    diagnostic_context = ""
-    if status == "FAIL" and error_tags:
-        diagnostic_context = _build_diagnostic_context(error_tags)
+    diagnostic_context = _build_diagnostic_context(error_tags) if (status == "FAIL" and error_tags) else None
 
-    # ----- RETURN RESULTS -----
     error_type_out = None if status == "PASS" else "LOGIC"
     return {
         "workspace": workspace_dir,
@@ -403,8 +353,8 @@ def run_verification(workspace_dir: str, fallback_module_name: str,
         "execution_time": execution_time,
         "module_name": actual_name,
         "log": log_output,
-        "vcd_snapshot": vcd_data_for_test,  # <--- Added for test_vcd.py to verify
+        "vcd_snapshot": vcd_data_for_test,
         "error_tags": error_tags,
-        "diagnostic_context": diagnostic_context or None,
+        "diagnostic_context": diagnostic_context,
         "error_type": error_type_out,
     }

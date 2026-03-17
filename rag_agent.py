@@ -25,6 +25,8 @@ Usage
 from __future__ import annotations
 
 import os
+os.environ["CUDA_VISIBLE_DEVICES"] = ""
+
 from pathlib import Path
 from typing import Dict, List, Optional
 import re

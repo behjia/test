@@ -3,6 +3,7 @@ from cocotb.triggers import Timer, RisingEdge, FallingEdge, ReadOnly
 import json
 import os
 import sys
+import random
 from pathlib import Path
 
 {% if is_sequential %}
@@ -42,14 +43,18 @@ async def {{ module_name }}_fsm_assertions(dut):
         await Timer(20, unit="ns")
         dut.rst.value = 0
         await RisingEdge(dut.clk)
-
+    
     for cycle in range(10):
-        for port_name, port in outputs | inputs:
-            if hasattr(dut, port_name):
-                getattr(dut, port_name).value = random.randint(0, 1)
+        # Only drive INPUTS randomly, you cannot drive outputs
+        {% for port in inputs %}
+        if hasattr(dut, '{{ port.name }}'):
+            dut.{{ port.name }}.value = random.randint(0, (1 << {{ port.width|default(1) }}) - 1)
+        {% endfor %}
+        
         {% if is_sequential %}
         await RisingEdge(dut.clk)
         {% else %}
         await Timer(1, unit="ns")
         {% endif %}
+        
     dut._log.info("✅ FSM Syntax & Linting Passed. Logic verification deferred to Top-Level Integration.")

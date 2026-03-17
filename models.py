@@ -2,13 +2,16 @@ from typing import List, Literal
 
 from pydantic import BaseModel, Field
 
+
 class PortSpec(BaseModel):
     name: str = Field(..., description="Port name (lowercase_with_underscores)")
     width: int = Field(default=1, ge=1, description="Bit-width of the port")
 
+
 class ParameterSpec(BaseModel):
     name: str = Field(..., description="Parameter name")
     default_value: int | str = Field(..., description="Default value")
+
 
 class HardwareSpec(BaseModel):
     module_name: str = Field(..., pattern=r"^[a-z][a-z0-9_]*$")
@@ -46,4 +49,15 @@ class ArchitecturePlan(BaseModel):
     )
     tasks: List[SystemTask] = Field(
         ..., description="Ordered list of tasks from bottom-level primitives up through the top-level integration."
+    )
+
+
+class TruthTableEntry(BaseModel):
+    inputs: dict[str, int] = Field(..., description="The input pin states (e.g., {'opcode': 51})")
+    outputs: dict[str, int] = Field(..., description="The expected output pin states")
+
+
+class OracleData(BaseModel):
+    truth_table: dict[str, TruthTableEntry] = Field(
+        ..., description="A mapping of operational states to their I/O values."
     )
