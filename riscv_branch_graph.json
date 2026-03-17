@@ -1,0 +1,17 @@
+{
+    "nodes": ["BEQ", "BNE", "BLT", "BGE", "BLTU", "BGEU"],
+    "edges": [
+        {"source": "BEQ", "target": "eq_flag", "relation": "depends_on"},
+        {"source": "BNE", "target": "eq_flag", "relation": "depends_on_negated"},
+        {"source": "BLT", "target": "lt_signed", "relation": "depends_on"},
+        {"source": "BGE", "target": "lt_signed", "relation": "depends_on_negated"}
+    ],
+    "attributes": {
+        "BEQ": {"funct3": "000"},
+        "BNE": {"funct3": "001"},
+        "BLT": {"funct3": "100"},
+        "BGE": {"funct3": "101"},
+        "BLTU": {"funct3": "110"},
+        "BGEU": {"funct3": "111"}
+    }
+}

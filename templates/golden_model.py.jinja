@@ -6,7 +6,8 @@ TRUTH_TABLE = {{ truth_table_json }}
 def generate_test_vectors():
     test_vectors = []
     # Generate edge cases from the Truth Table
-    for key, data in TRUTH_TABLE.items():
+    table_data = TRUTH_TABLE.get("truth_table", TRUTH_TABLE)
+    for key, data in table_data.items():
         # Inject the primary input (e.g., opcode or instruction)
         vec = {k: v for k, v in data.get("inputs", {}).items()}
         # Fill remaining ports with random noise to ensure robustness
@@ -29,7 +30,8 @@ def golden_model(model_state, inputs):
     expected_output = {}
     
     # 1. Try to match the inputs to our Truth Table
-    for key, data in TRUTH_TABLE.items():
+    table_data = TRUTH_TABLE.get("truth_table", TRUTH_TABLE)
+    for key, data in table_data.items():
         match = True
         for ink, inv in data.get("inputs", {}).items():
             if inputs.get(ink) != inv:
@@ -39,8 +41,33 @@ def golden_model(model_state, inputs):
             expected_output = data.get("outputs", {})
             return model_state, expected_output
             
-    # 2. Fallback to default 0s if no match found
-    for port in {{ output_ports }}:
-        expected_output[port] = 0
-        
+    # 2. Fallback Logic
+    # If no exact match in the TRUTH_TABLE, calculate the result programmatically.
+    
+    # --- BRANCH COMPARATOR FALLBACK MATH ---
+    op_a = inputs.get('operand_a', 0)
+    op_b = inputs.get('operand_b', 0)
+    
+    # Handle Python's negative number representation for signed comparison
+    op_a_signed = op_a - (1<<32) if op_a & (1<<31) else op_a
+    op_b_signed = op_b - (1<<32) if op_b & (1<<31) else op_b
+
+    eq = (op_a == op_b)
+    lt_s = op_a_signed < op_b_signed
+    lt_u = op_a < op_b
+    
+    branch_type = inputs.get('branch_type', 0)
+    taken = 0
+    if branch_type == 0 and eq: taken = 1     # BEQ
+    elif branch_type == 1 and not eq: taken = 1 # BNE
+    elif branch_type == 2 and lt_s: taken = 1 # BLT
+    elif branch_type == 3 and not lt_s: taken = 1 # BGE
+    elif branch_type == 4 and lt_u: taken = 1 # BLTU
+    elif branch_type == 5 and not lt_u: taken = 1 # BGEU
+
+    expected_output['branch_taken'] = taken
+    expected_output['eq_flag'] = 1 if eq else 0
+    expected_output['lt_signed'] = 1 if lt_s else 0
+    expected_output['lt_unsigned'] = 1 if lt_u else 0
+    
     return model_state, expected_output

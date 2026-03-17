@@ -122,56 +122,20 @@ class HardwareRAG:
     # Public API
     # ------------------------------------------------------------------
 
-    def ingest_document(self, filepath: str, collection_name: Optional[str] = None) -> int:
-        """Read a plain-text specification file and add its chunks to ChromaDB.
-
-        The document is split into overlapping fixed-size chunks so that
-        long rules (e.g., a full AXI handshake description) are never
-        silently truncated.  Chunk IDs are deterministic (``<filename>::<N>``)
-        so re-ingesting the same file is safe — ChromaDB will upsert.
-
-        Parameters
-        ----------
-        filepath:
-            Path to the ``.txt`` (or any plain-text) specification file.
-
-        Returns
-        -------
-        int
-            Number of new chunks stored.
-
-        Raises
-        ------
-        FileNotFoundError
-            When *filepath* does not exist.
-        """
-        path = Path(filepath)
-        if not path.is_file():
-            raise FileNotFoundError(f"[RAG] Spec file not found: {filepath}")
-
+    def ingest_text(self, text: str, doc_id: str, collection_name: Optional[str] = None) -> int:
+        """Ingests a raw text string into the specified collection."""
         target_collection = self._collection_for(collection_name)
-        print(f"[RAG] Ingesting: {path.name} into '{self._collection_name(collection_name)}'")
-        raw_text = path.read_text(encoding="utf-8", errors="replace")
-
-        chunks = self._split_text(raw_text)
+        chunks = self._split_text(text)
         if not chunks:
-            print(f"[RAG] ⚠️  File is empty, nothing to ingest.")
             return 0
-
-        # Build parallel lists required by ChromaDB's add/upsert API
-        ids        = [f"{path.name}::{i}" for i in range(len(chunks))]
-        metadatas  = [{"source": path.name, "chunk": i} for i in range(len(chunks))]
-
-        # upsert is idempotent — safe to re-ingest updated documents
+        
+        ids = [f"{doc_id}::{i}" for i in range(len(chunks))]
+        metadatas = [{"source": doc_id, "chunk": i} for i in range(len(chunks))]
+        
         target_collection.upsert(
             ids=ids,
             documents=chunks,
-            metadatas=metadatas,
-        )
-
-        print(
-            f"[RAG] ✅ Stored {len(chunks)} chunks from '{path.name}'. "
-            f"Total in '{self._collection_name(collection_name)}': {target_collection.count()}"
+            metadatas=metadatas
         )
         return len(chunks)
 

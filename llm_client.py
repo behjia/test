@@ -896,26 +896,26 @@ def setup_workspaces(variations: list, base_dir: str = "workspace"):
         saved_paths.append(str(run_folder))
         print(f"  -> Saved Variation {idx + 1} to {file_path}")
     return saved_paths
-# =========================================================================
-# CLI smoke-test
-# =========================================================================
-if __name__ == "__main__":
-    ai_client = EDA_LLM_Client()
-    # 1. Ask for a 4-bit ALU
-    test_request = (
-        "Design a 4-bit ALU that can do addition, subtraction, AND, and OR "
-        "operations. It needs a 2-bit opcode selector."
-    )
-    # 2. Get the validated HardwareSpec
-    spec = ai_client.generate_spec(test_request)
-    # 3. Generate hardware
-    if isinstance(spec, HardwareSpec):
-        print(f"\n📋 Validated spec: {spec.model_dump_json(indent=2)}")
-        rtl_code = ai_client.generate_rtl(spec)
-        if rtl_code:
-            sandbox_dirs = setup_workspaces([rtl_code])
-            print("\n✅ SUCCESS: Pipeline Complete. RTL is isolated and ready for Ray.")
-        else:
-            print("❌ ERROR: RTL generation failed.")
-    else:
-        print(f"\nAborting hardware generation due to spec failure:\n{spec}")
+# # =========================================================================
+# # CLI smoke-test
+# # =========================================================================
+# if __name__ == "__main__":
+#     ai_client = EDA_LLM_Client()
+#     # 1. Ask for a 4-bit ALU
+#     test_request = (
+#         "Design a 4-bit ALU that can do addition, subtraction, AND, and OR "
+#         "operations. It needs a 2-bit opcode selector."
+#     )
+#     # 2. Get the validated HardwareSpec
+#     spec = ai_client.generate_spec(test_request)
+#     # 3. Generate hardware
+#     if isinstance(spec, HardwareSpec):
+#         print(f"\n📋 Validated spec: {spec.model_dump_json(indent=2)}")
+#         rtl_code = ai_client.generate_rtl(spec)
+#         if rtl_code:
+#             sandbox_dirs = setup_workspaces([rtl_code])
+#             print("\n✅ SUCCESS: Pipeline Complete. RTL is isolated and ready for Ray.")
+#         else:
+#             print("❌ ERROR: RTL generation failed.")
+#     else:
+#         print(f"\nAborting hardware generation due to spec failure:\n{spec}")

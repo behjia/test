@@ -41,7 +41,7 @@ async def {{ module_name }}_math_equivalence(dut):
         except ValueError:
             hardware_result["{{ out.name }}"] = 0
         {% endfor %}
-
+        
         try:
             _, expected_output = golden_model(model_state, input_dict)
         except Exception as exc:
@@ -49,4 +49,8 @@ async def {{ module_name }}_math_equivalence(dut):
 
         assert hardware_result == expected_output, \
             f"Math equivalence failure: Inputs={input_dict} | HW={hardware_result} | GOLDEN={expected_output}"
+            
+        # PERMANENT FIX: Escapes the ReadOnly phase before the next iteration drives inputs
+        await Timer(1)
+
     dut._log.info("✅ Math equivalence checks passed for all golden vectors.")
